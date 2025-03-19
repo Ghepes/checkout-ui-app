@@ -15,11 +15,30 @@ interface CheckoutRequest {
 }
 
 export async function POST(req: Request) {
+  // Handle CORS preflight request
+  if (req.method === 'OPTIONS') {
+    return new Response(null, {
+      headers: {
+        'Access-Control-Allow-Origin': 'https://ui-app.com',
+        'Access-Control-Allow-Methods': 'POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type',
+      },
+    });
+  }
+
   try {
     const { items, userId }: CheckoutRequest = await req.json();
 
     if (!items || !items.length) {
-      return NextResponse.json({ error: "Cart is empty" }, { status: 400 });
+      return NextResponse.json(
+        { error: "Cart is empty" },
+        { 
+          status: 400,
+          headers: {
+            'Access-Control-Allow-Origin': 'https://ui-app.com',
+          }
+        }
+      );
     }
 
     const session = await stripe.checkout.sessions.create({
@@ -37,9 +56,24 @@ export async function POST(req: Request) {
       },
     });
 
-    return NextResponse.json({ url: session.url });
+    return NextResponse.json(
+      { url: session.url },
+      {
+        headers: {
+          'Access-Control-Allow-Origin': 'https://ui-app.com',
+        }
+      }
+    );
   } catch (error) {
     console.error("Checkout API error:", error);
-    return NextResponse.json({ error: "Failed to create checkout session" }, { status: 500 });
+    return NextResponse.json(
+      { error: "Failed to create checkout session" },
+      { 
+        status: 500,
+        headers: {
+          'Access-Control-Allow-Origin': 'https://ui-app.com',
+        }
+      }
+    );
   }
 }
