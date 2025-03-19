@@ -49,7 +49,7 @@ export async function POST(req: Request) {
         quantity: item.quantity,
       })),
       success_url: `https://ui-app.com/success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `https://ui-app.com/cart`,
+      cancel_url: `https://ui-app.com/cancel`,
       metadata: {
         user_id: userId,
         product_ids: items.map((item: CartItem) => item.id).join(","),
