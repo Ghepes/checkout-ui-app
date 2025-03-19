@@ -3,14 +3,9 @@ import React from "react";
 import { Geist, Geist_Mono } from "next/font/google";
 import cn from "classnames";
 import { TooltipProvider } from "@geist-ui/core";
-import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
-import { SiteHeader } from "@/components/SiteHeader";
-
+import { SiteHeader } from "../components/site-header";
 import { Toaster } from "react-hot-toast";
-
-import "./globals.css";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -41,7 +36,6 @@ export default function RootLayout({
         <meta name="description" content="ui-app.com" />
         <link rel="icon" href="/favicon.ico" />
         <link rel="apple-touch-icon" href="/logo192.png" />
-
         <link rel="preconnect" href="https://ui-app.com" crossOrigin="anonymous" />
         <link rel="preconnect" href="https://user.ui-app.com" crossOrigin="anonymous" />
         <link rel="preconnect" href="https://vendor.ui-app.com" crossOrigin="anonymous" />
@@ -79,4 +73,3 @@ export default function RootLayout({
     </html>
   );
 }
-
