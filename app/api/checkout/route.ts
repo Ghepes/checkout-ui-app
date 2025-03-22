@@ -23,7 +23,7 @@ export async function POST(req: Request) {
   if (req.method === "OPTIONS") {
     return new Response(null, {
       headers: {
-        "Access-Control-Allow-Origin": "https://ui-app.com", // Allow requests from any origin
+        "Access-Control-Allow-Origin": "https://ui-app.com",
         "Access-Control-Allow-Methods": "POST, OPTIONS",
         "Access-Control-Allow-Headers": "Content-Type",
       },
@@ -32,8 +32,6 @@ export async function POST(req: Request) {
 
   try {
     const { items, userId }: CheckoutRequest = await req.json()
-
-    console.log("Checkout server received request:", { userId, itemCount: items.length })
 
     if (!items || !items.length) {
       return NextResponse.json(
@@ -47,13 +45,11 @@ export async function POST(req: Request) {
       )
     }
 
-    // Log the items with their Connected Account IDs
     console.log(
-      "Items with Connected Account IDs:",
+      "Received checkout request with items:",
       items.map((item) => ({
         id: item.id,
-        name: item.name,
-        stripeConnectedAccountId: item.stripeConnectedAccountId || "none",
+        stripeConnectedAccountId: item.stripeConnectedAccountId,
       })),
     )
 
@@ -75,8 +71,6 @@ export async function POST(req: Request) {
       }
     })
 
-    console.log("Items grouped by account:", Object.keys(itemsByAccount))
-
     // If we only have platform items or items from a single account, create a single checkout session
     if (
       Object.keys(itemsByAccount).length === 1 ||
@@ -84,8 +78,6 @@ export async function POST(req: Request) {
     ) {
       // Get the account ID (if any)
       const accountId = Object.keys(itemsByAccount).find((id) => id !== "platform")
-
-      console.log(`Creating single checkout session with account ID: ${accountId || "platform"}`)
 
       // Create the checkout session
       const session = await createCheckoutSession(
@@ -105,8 +97,6 @@ export async function POST(req: Request) {
     }
     // If we have items from multiple accounts, we need to handle this differently
     else {
-      console.log("Creating multiple checkout sessions for different accounts")
-
       // For simplicity in this example, we'll create a checkout session for each account
       // and return the URL for the first one
       // In a real implementation, you'd need a more sophisticated approach
@@ -158,9 +148,6 @@ async function createCheckoutSession(items: CartItem[], userId: string, stripeCo
     quantity: item.quantity,
   }))
 
-  // Get the base URL for success and cancel URLs
-  const baseUrl = process.env.FRONTEND_URL || "https://ui-app.com"
-
   const sessionParams: Stripe.Checkout.SessionCreateParams = {
     payment_method_types: ["card"],
     mode: "payment",
@@ -196,8 +183,6 @@ async function createCheckoutSession(items: CartItem[], userId: string, stripeCo
     // Calculate the application fee amount
     const applicationFeeAmount = Math.round(totalAmount * (applicationFeePercent / 100))
 
-    console.log(`Total amount: ${totalAmount}, Application fee: ${applicationFeeAmount}`)
-
     // Add the payment_intent_data with the application fee and transfer data
     sessionParams.payment_intent_data = {
       application_fee_amount: applicationFeeAmount,
@@ -207,13 +192,7 @@ async function createCheckoutSession(items: CartItem[], userId: string, stripeCo
     }
   }
 
-  try {
-    const session = await stripe.checkout.sessions.create(sessionParams)
-    console.log(`Created checkout session: ${session.id}, URL: ${session.url}`)
-    return session
-  } catch (error) {
-    console.error("Error creating checkout session:", error)
-    throw error
-  }
+  return await stripe.checkout.sessions.create(sessionParams)
 }
 
+export default POST
