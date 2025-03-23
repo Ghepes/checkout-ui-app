@@ -16,6 +16,7 @@ interface CartItem {
 interface CheckoutRequest {
   items: CartItem[]
   userId: string
+  userEmail?: string // Add userEmail to the interface
 }
 
 export async function POST(req: Request) {
@@ -31,9 +32,9 @@ export async function POST(req: Request) {
   }
 
   try {
-    const { items, userId }: CheckoutRequest = await req.json()
+    const { items, userId, userEmail }: CheckoutRequest = await req.json()
 
-    console.log("Checkout server received request:", { userId, itemCount: items.length })
+    console.log("Checkout server received request:", { userId, userEmail, itemCount: items.length })
 
     if (!items || !items.length) {
       return NextResponse.json(
@@ -91,6 +92,7 @@ export async function POST(req: Request) {
       const session = await createCheckoutSession(
         items,
         userId,
+        userEmail, // Pass userEmail to createCheckoutSession
         accountId && accountId !== "platform" ? accountId : undefined,
       )
 
@@ -114,9 +116,9 @@ export async function POST(req: Request) {
       const sessions = await Promise.all(
         Object.entries(itemsByAccount).map(async ([accountId, accountItems]) => {
           if (accountId === "platform") {
-            return createCheckoutSession(accountItems, userId)
+            return createCheckoutSession(accountItems, userId, userEmail)
           } else {
-            return createCheckoutSession(accountItems, userId, accountId)
+            return createCheckoutSession(accountItems, userId, userEmail, accountId)
           }
         }),
       )
@@ -148,8 +150,37 @@ export async function POST(req: Request) {
   }
 }
 
+// Helper function to find existing customer by email
+async function findCustomerByEmail(email: string): Promise<string | null> {
+  if (!email) return null
+
+  try {
+    // Search for customers with the given email
+    const customers = await stripe.customers.list({
+      email: email,
+      limit: 1,
+    })
+
+    // If a customer with this email exists, return their ID
+    if (customers.data.length > 0) {
+      console.log(`Found existing customer with email ${email}: ${customers.data[0].id}`)
+      return customers.data[0].id
+    }
+
+    return null
+  } catch (error) {
+    console.error("Error finding customer by email:", error)
+    return null
+  }
+}
+
 // Helper function to create a checkout session
-async function createCheckoutSession(items: CartItem[], userId: string, stripeConnectedAccountId?: string) {
+async function createCheckoutSession(
+  items: CartItem[],
+  userId: string,
+  userEmail?: string,
+  stripeConnectedAccountId?: string,
+) {
   // Calculate the application fee percentage (e.g., 10%)
   const applicationFeePercent = 10
 
@@ -162,7 +193,7 @@ async function createCheckoutSession(items: CartItem[], userId: string, stripeCo
   const baseUrl = process.env.FRONTEND_URL || "https://ui-app.com"
 
   const sessionParams: Stripe.Checkout.SessionCreateParams = {
-    payment_method_types: ['card'],
+    payment_method_types: ["card"],
     mode: "payment",
     line_items: lineItems,
     success_url: `${baseUrl}/success?session_id={CHECKOUT_SESSION_ID}`,
@@ -174,6 +205,19 @@ async function createCheckoutSession(items: CartItem[], userId: string, stripeCo
       vendor_names: items.map((item: CartItem) => item.vendorName || "").join(","),
       vendor_emails: items.map((item: CartItem) => item.vendorEmail || "").join(","),
     },
+  }
+
+  // If we have a user email, try to find an existing customer
+  if (userEmail) {
+    const existingCustomerId = await findCustomerByEmail(userEmail)
+
+    if (existingCustomerId) {
+      // Use the existing customer ID
+      sessionParams.customer = existingCustomerId
+    } else {
+      // If no existing customer, set the email for the new customer
+      sessionParams.customer_email = userEmail
+    }
   }
 
   // If we have a Stripe Connected Account ID, add it to the session params
