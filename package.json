@@ -1,6 +1,6 @@
 {
   "name": "autor-dev-pkg-checkout",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "scripts": {
     "dev": "next dev --turbopack",
@@ -10,17 +10,17 @@
   },
   "dependencies": {
     "dotenv": "^16.4.7",
-    "next": "15.1.6",
+    "next": "15.2.3",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "stripe": "^17.6.0"
-
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "next": ">=14.2.21",
     "eslint": "^9",
     "eslint-config-next": "15.1.6",
     "postcss": "^8",
@@ -54,5 +54,6 @@
   "bugs": {
     "url": "https://github.com/UI-APPS/checkout-ui-app/issues"
   },
-  "homepage": "https://github.com/UI-APPS/checkout-ui-app#readme"
+  "homepage": "https://github.com/UI-APPS/checkout-ui-app#readme",
+  "packageManager": "pnpm@10.6.2+sha512.47870716bea1572b53df34ad8647b42962bc790ce2bf4562ba0f643237d7302a3d6a8ecef9e4bdfc01d23af1969aa90485d4cebb0b9638fa5ef1daef656f6c1b"
 }
