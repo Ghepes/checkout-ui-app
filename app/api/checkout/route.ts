@@ -162,7 +162,7 @@ async function createCheckoutSession(items: CartItem[], userId: string, stripeCo
   const baseUrl = process.env.FRONTEND_URL || "https://ui-app.com"
 
   const sessionParams: Stripe.Checkout.SessionCreateParams = {
-    payment_method_types: ['card', 'paypal'],
+    payment_method_types: ['card'],
     mode: "payment",
     line_items: lineItems,
     success_url: `${baseUrl}/success?session_id={CHECKOUT_SESSION_ID}`,
