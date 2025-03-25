@@ -16,7 +16,7 @@ interface CartItem {
 interface CheckoutRequest {
   items: CartItem[]
   userId: string
-  userEmail?: string // Add userEmail to the interface
+  userEmail?: string
 }
 
 export async function POST(req: Request) {
@@ -24,7 +24,7 @@ export async function POST(req: Request) {
   if (req.method === "OPTIONS") {
     return new Response(null, {
       headers: {
-        "Access-Control-Allow-Origin": "https://ui-app.com", // Allow requests from any origin
+        "Access-Control-Allow-Origin": "https://ui-app.com",
         "Access-Control-Allow-Methods": "POST, OPTIONS",
         "Access-Control-Allow-Headers": "Content-Type",
       },
@@ -92,7 +92,7 @@ export async function POST(req: Request) {
       const session = await createCheckoutSession(
         items,
         userId,
-        userEmail, // Pass userEmail to createCheckoutSession
+        userEmail,
         accountId && accountId !== "platform" ? accountId : undefined,
       )
 
@@ -105,36 +105,76 @@ export async function POST(req: Request) {
         },
       )
     }
-    // If we have items from multiple accounts, we need to handle this differently
+    // If we have items from multiple accounts, create a separate checkout for each vendor
     else {
       console.log("Creating multiple checkout sessions for different accounts")
 
-      // For simplicity in this example, we'll create a checkout session for each account
-      // and return the URL for the first one
-      // In a real implementation, you'd need a more sophisticated approach
+      // Create a checkout session for each vendor account plus one for platform items if any
+      const checkoutSessions = []
 
-      const sessions = await Promise.all(
-        Object.entries(itemsByAccount).map(async ([accountId, accountItems]) => {
-          if (accountId === "platform") {
-            return createCheckoutSession(accountItems, userId, userEmail)
-          } else {
-            return createCheckoutSession(accountItems, userId, userEmail, accountId)
-          }
-        }),
-      )
+      // First, handle platform items if any
+      if (itemsByAccount["platform"] && itemsByAccount["platform"].length > 0) {
+        const platformSession = await createCheckoutSession(itemsByAccount["platform"], userId, userEmail)
+        checkoutSessions.push({
+          accountId: "platform",
+          session: platformSession,
+          items: itemsByAccount["platform"],
+        })
+      }
 
-      // For this example, just return the first session URL
-      // In a real implementation, you might want to create a custom checkout page
-      // that handles multiple sessions
+      // Then handle each vendor's items
+      for (const accountId of Object.keys(itemsByAccount)) {
+        if (accountId !== "platform") {
+          const vendorItems = itemsByAccount[accountId]
+          const vendorSession = await createCheckoutSession(vendorItems, userId, userEmail, accountId)
+          checkoutSessions.push({
+            accountId,
+            session: vendorSession,
+            items: vendorItems,
+          })
+        }
+      }
 
-      return NextResponse.json(
-        { url: sessions[0].url },
-        {
-          headers: {
-            "Access-Control-Allow-Origin": "https://ui-app.com",
+      // Create a special checkout page that will handle multiple sessions
+      // For now, we'll just return the first session URL with information about multiple vendors
+      if (checkoutSessions.length > 0) {
+        // Store the session information for later use
+        // In a real implementation, you would store this in a database
+        const sessionInfo = {
+          userId,
+          sessions: checkoutSessions.map((s) => ({
+            sessionId: s.session.id,
+            accountId: s.accountId,
+            amount: s.session.amount_total,
+            url: s.session.url,
+            items: s.items.map((item) => ({
+              id: item.id,
+              name: item.name,
+              price: item.price,
+              quantity: item.quantity,
+            })),
+          })),
+        }
+
+        console.log("Created multiple checkout sessions:", sessionInfo)
+
+        // Return the first session URL with a flag indicating multiple vendors
+        return NextResponse.json(
+          {
+            url: checkoutSessions[0].session.url,
+            multipleVendors: true,
+            vendorCount: checkoutSessions.length,
+            totalAmount: checkoutSessions.reduce((sum, s) => sum + (s.session.amount_total || 0), 0) / 100,
           },
-        },
-      )
+          {
+            headers: {
+              "Access-Control-Allow-Origin": "https://ui-app.com",
+            },
+          },
+        )
+      } else {
+        throw new Error("Failed to create any checkout sessions")
+      }
     }
   } catch (error) {
     console.error("Checkout API error:", error)
@@ -204,6 +244,7 @@ async function createCheckoutSession(
       product_names: items.map((item: CartItem) => item.name || "").join(","),
       vendor_names: items.map((item: CartItem) => item.vendorName || "").join(","),
       vendor_emails: items.map((item: CartItem) => item.vendorEmail || "").join(","),
+      connected_account_id: stripeConnectedAccountId || "",
     },
   }
 
