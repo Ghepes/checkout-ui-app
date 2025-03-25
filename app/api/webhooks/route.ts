@@ -38,6 +38,16 @@ export async function POST(req: Request) {
 
         console.log(`Processing ${transferData.length} transfers for payment ${paymentIntent.id}`)
 
+        // First, retrieve the payment intent with expanded charges
+        const paymentIntentWithCharges = await stripe.paymentIntents.retrieve(paymentIntent.id, { expand: ["charges"] })
+
+        // Get the latest charge ID
+        const chargeId = paymentIntentWithCharges.latest_charge as string
+
+        if (!chargeId) {
+          throw new Error(`No charge found for payment intent ${paymentIntent.id}`)
+        }
+
         // Create transfers for each vendor
         for (const transfer of transferData) {
           try {
@@ -45,7 +55,7 @@ export async function POST(req: Request) {
               amount: transfer.amount,
               currency: paymentIntent.currency,
               destination: transfer.destination,
-              source_transaction: paymentIntent.charges.data[0].id,
+              source_transaction: chargeId,
               description: `Transfer for payment ${paymentIntent.id}`,
             })
 
@@ -62,4 +72,3 @@ export async function POST(req: Request) {
 
   return NextResponse.json({ received: true })
 }
-
