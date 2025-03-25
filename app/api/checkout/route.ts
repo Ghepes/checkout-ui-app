@@ -195,7 +195,13 @@ async function createMultiVendorCheckoutSession(items: CartItem[], userId: strin
       metadata: {
         transfer_data: JSON.stringify(Object.values(transferDataItems)),
       },
+      // Ensure we capture the payment automatically
+      capture_method: "automatic",
+      // Make sure we set the transfer group to link the transfers to this payment
+      transfer_group: `order_${Date.now()}`,
     }
+
+    console.log("Transfer data for payment intent:", JSON.stringify(Object.values(transferDataItems)))
   }
 
   try {
@@ -213,4 +219,5 @@ async function createMultiVendorCheckoutSession(items: CartItem[], userId: strin
     throw error
   }
 }
+
 
