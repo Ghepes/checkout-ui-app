@@ -58,124 +58,17 @@ export async function POST(req: Request) {
       })),
     )
 
-    // Group items by Stripe account ID
-    const itemsByAccount: Record<string, CartItem[]> = {}
+    // Create a single checkout session that handles all vendors
+    const session = await createMultiVendorCheckoutSession(items, userId, userEmail)
 
-    // Default group for items without a Stripe account ID
-    itemsByAccount["platform"] = []
-
-    // Group items by their Stripe Connected Account ID
-    items.forEach((item) => {
-      if (item.stripeConnectedAccountId) {
-        if (!itemsByAccount[item.stripeConnectedAccountId]) {
-          itemsByAccount[item.stripeConnectedAccountId] = []
-        }
-        itemsByAccount[item.stripeConnectedAccountId].push(item)
-      } else {
-        itemsByAccount["platform"].push(item)
-      }
-    })
-
-    console.log("Items grouped by account:", Object.keys(itemsByAccount))
-
-    // If we only have platform items or items from a single account, create a single checkout session
-    if (
-      Object.keys(itemsByAccount).length === 1 ||
-      (Object.keys(itemsByAccount).length === 2 && itemsByAccount["platform"].length === 0)
-    ) {
-      // Get the account ID (if any)
-      const accountId = Object.keys(itemsByAccount).find((id) => id !== "platform")
-
-      console.log(`Creating single checkout session with account ID: ${accountId || "platform"}`)
-
-      // Create the checkout session
-      const session = await createCheckoutSession(
-        items,
-        userId,
-        userEmail,
-        accountId && accountId !== "platform" ? accountId : undefined,
-      )
-
-      return NextResponse.json(
-        { url: session.url },
-        {
-          headers: {
-            "Access-Control-Allow-Origin": "https://ui-app.com",
-          },
+    return NextResponse.json(
+      { url: session.url },
+      {
+        headers: {
+          "Access-Control-Allow-Origin": "https://ui-app.com",
         },
-      )
-    }
-    // If we have items from multiple accounts, create a separate checkout for each vendor
-    else {
-      console.log("Creating multiple checkout sessions for different accounts")
-
-      // Create a checkout session for each vendor account plus one for platform items if any
-      const checkoutSessions = []
-
-      // First, handle platform items if any
-      if (itemsByAccount["platform"] && itemsByAccount["platform"].length > 0) {
-        const platformSession = await createCheckoutSession(itemsByAccount["platform"], userId, userEmail)
-        checkoutSessions.push({
-          accountId: "platform",
-          session: platformSession,
-          items: itemsByAccount["platform"],
-        })
-      }
-
-      // Then handle each vendor's items
-      for (const accountId of Object.keys(itemsByAccount)) {
-        if (accountId !== "platform") {
-          const vendorItems = itemsByAccount[accountId]
-          const vendorSession = await createCheckoutSession(vendorItems, userId, userEmail, accountId)
-          checkoutSessions.push({
-            accountId,
-            session: vendorSession,
-            items: vendorItems,
-          })
-        }
-      }
-
-      // Create a special checkout page that will handle multiple sessions
-      // For now, we'll just return the first session URL with information about multiple vendors
-      if (checkoutSessions.length > 0) {
-        // Store the session information for later use
-        // In a real implementation, you would store this in a database
-        const sessionInfo = {
-          userId,
-          sessions: checkoutSessions.map((s) => ({
-            sessionId: s.session.id,
-            accountId: s.accountId,
-            amount: s.session.amount_total,
-            url: s.session.url,
-            items: s.items.map((item) => ({
-              id: item.id,
-              name: item.name,
-              price: item.price,
-              quantity: item.quantity,
-            })),
-          })),
-        }
-
-        console.log("Created multiple checkout sessions:", sessionInfo)
-
-        // Return the first session URL with a flag indicating multiple vendors
-        return NextResponse.json(
-          {
-            url: checkoutSessions[0].session.url,
-            multipleVendors: true,
-            vendorCount: checkoutSessions.length,
-            totalAmount: checkoutSessions.reduce((sum, s) => sum + (s.session.amount_total || 0), 0) / 100,
-          },
-          {
-            headers: {
-              "Access-Control-Allow-Origin": "https://ui-app.com",
-            },
-          },
-        )
-      } else {
-        throw new Error("Failed to create any checkout sessions")
-      }
-    }
+      },
+    )
   } catch (error) {
     console.error("Checkout API error:", error)
     return NextResponse.json(
@@ -214,24 +107,57 @@ async function findCustomerByEmail(email: string): Promise<string | null> {
   }
 }
 
-// Helper function to create a checkout session
-async function createCheckoutSession(
-  items: CartItem[],
-  userId: string,
-  userEmail?: string,
-  stripeConnectedAccountId?: string,
-) {
+// Create a checkout session that handles multiple vendors
+async function createMultiVendorCheckoutSession(items: CartItem[], userId: string, userEmail?: string) {
   // Calculate the application fee percentage (e.g., 10%)
   const applicationFeePercent = 10
-
-  const lineItems = items.map((item: CartItem) => ({
-    price: item.priceId,
-    quantity: item.quantity,
-  }))
 
   // Get the base URL for success and cancel URLs
   const baseUrl = process.env.FRONTEND_URL || "https://ui-app.com"
 
+  // Prepare line items with payment intent data for each vendor
+  const lineItems: Stripe.Checkout.SessionCreateParams.LineItem[] = []
+  const transferDataItems: Record<string, { amount: number; destination: string }> = {}
+
+  // Process each item and prepare line items and transfer data
+  for (const item of items) {
+    try {
+      // Get the price details to calculate the correct amount
+      const price = await stripe.prices.retrieve(item.priceId)
+
+      if (!price.unit_amount) {
+        console.warn(`Price ${item.priceId} has no unit_amount, skipping`)
+        continue
+      }
+
+      // Add the line item to the checkout
+      lineItems.push({
+        price: item.priceId,
+        quantity: item.quantity,
+      })
+
+      // If this item has a connected account, prepare transfer data
+      if (item.stripeConnectedAccountId) {
+        const totalAmount = price.unit_amount * item.quantity
+        const feeAmount = Math.round(totalAmount * (applicationFeePercent / 100))
+        const transferAmount = totalAmount - feeAmount
+
+        // Add or update transfer data for this connected account
+        if (transferDataItems[item.stripeConnectedAccountId]) {
+          transferDataItems[item.stripeConnectedAccountId].amount += transferAmount
+        } else {
+          transferDataItems[item.stripeConnectedAccountId] = {
+            amount: transferAmount,
+            destination: item.stripeConnectedAccountId,
+          }
+        }
+      }
+    } catch (error) {
+      console.error(`Error processing item ${item.id}:`, error)
+    }
+  }
+
+  // Prepare session parameters
   const sessionParams: Stripe.Checkout.SessionCreateParams = {
     payment_method_types: ["card"],
     mode: "payment",
@@ -240,11 +166,11 @@ async function createCheckoutSession(
     cancel_url: `${baseUrl}/cancel`,
     metadata: {
       user_id: userId,
-      product_ids: items.map((item: CartItem) => item.id).join(","),
-      product_names: items.map((item: CartItem) => item.name || "").join(","),
-      vendor_names: items.map((item: CartItem) => item.vendorName || "").join(","),
-      vendor_emails: items.map((item: CartItem) => item.vendorEmail || "").join(","),
-      connected_account_id: stripeConnectedAccountId || "",
+      product_ids: items.map((item) => item.id).join(","),
+      product_names: items.map((item) => item.name || "").join(","),
+      vendor_names: items.map((item) => item.vendorName || "").join(","),
+      vendor_emails: items.map((item) => item.vendorEmail || "").join(","),
+      connected_account_ids: Object.keys(transferDataItems).join(","),
     },
   }
 
@@ -261,33 +187,13 @@ async function createCheckoutSession(
     }
   }
 
-  // If we have a Stripe Connected Account ID, add it to the session params
-  if (stripeConnectedAccountId) {
-    console.log(`Creating checkout session with Connected Account: ${stripeConnectedAccountId}`)
-
-    // Get the total amount for these items to calculate the application fee
-    let totalAmount = 0
-    for (const item of items) {
-      try {
-        const price = await stripe.prices.retrieve(item.priceId)
-        if (price.unit_amount) {
-          totalAmount += price.unit_amount * item.quantity
-        }
-      } catch (err) {
-        console.error(`Error retrieving price ${item.priceId}:`, err)
-      }
-    }
-
-    // Calculate the application fee amount
-    const applicationFeeAmount = Math.round(totalAmount * (applicationFeePercent / 100))
-
-    console.log(`Total amount: ${totalAmount}, Application fee: ${applicationFeeAmount}`)
-
-    // Add the payment_intent_data with the application fee and transfer data
+  // If we have transfer data, set up payment intent data
+  if (Object.keys(transferDataItems).length > 0) {
+    // For multiple vendors, we need to use Stripe's transfer API after payment is complete
+    // We'll store the transfer data in the payment intent metadata
     sessionParams.payment_intent_data = {
-      application_fee_amount: applicationFeeAmount,
-      transfer_data: {
-        destination: stripeConnectedAccountId,
+      metadata: {
+        transfer_data: JSON.stringify(Object.values(transferDataItems)),
       },
     }
   }
@@ -295,6 +201,12 @@ async function createCheckoutSession(
   try {
     const session = await stripe.checkout.sessions.create(sessionParams)
     console.log(`Created checkout session: ${session.id}, URL: ${session.url}`)
+
+    // Log transfer data for debugging
+    if (Object.keys(transferDataItems).length > 0) {
+      console.log("Transfer data for vendors:", transferDataItems)
+    }
+
     return session
   } catch (error) {
     console.error("Error creating checkout session:", error)
