@@ -95,10 +95,10 @@ async function handlePaymentIntentSucceeded(event: Stripe.Event) {
       return NextResponse.json({ error: "No charge ID found" }, { status: 400 });
     }
 
-    // Procesează fiecare transfer
+    // Process each transfer
     for (const [accountId, { amount, application_fee }] of Object.entries(transferGroups)) {
       try {
-        // 1. Creează transferul către vânzător
+        // 1. Create transfer to vendor
         const transfer = await stripe.transfers.create({
           amount,
           currency: paymentIntent.currency,
@@ -110,19 +110,16 @@ async function handlePaymentIntentSucceeded(event: Stripe.Event) {
 
         console.log(`Created transfer ${transfer.id} to ${accountId} for ${amount}`);
 
-        // 2. Creează application fee pentru platformă
+        // 2. For application fees, they are now automatically created with the payment intent
+        // when using on_behalf_of and transfer_data parameters
+        // No need to manually create application fees anymore
         if (application_fee > 0) {
-          const fee = await stripe.applicationFees.create({
-            amount: application_fee,
-            currency: paymentIntent.currency,
-            originating_transaction: chargeId,
-          });
-          console.log(`Created application fee ${fee.id} for ${application_fee}`);
+          console.log(`Application fee of ${application_fee} automatically processed`);
         }
 
       } catch (error) {
         console.error(`Failed processing for account ${accountId}:`, error);
-        // Poți adăuga aici notificări sau retry logic
+        // Add retry logic or notifications here
       }
     }
 
