@@ -189,19 +189,12 @@ async function createMultiVendorCheckoutSession(items: CartItem[], userId: strin
 
   // If we have transfer data, set up payment intent data
   if (Object.keys(transferDataItems).length > 0) {
-    // For multiple vendors, we need to use Stripe's transfer API after payment is complete
-    // We'll store the transfer data in the payment intent metadata
+    // Store the transfer data in the payment intent metadata
     sessionParams.payment_intent_data = {
       metadata: {
         transfer_data: JSON.stringify(Object.values(transferDataItems)),
       },
-      // Ensure we capture the payment automatically
-      capture_method: "automatic",
-      // Make sure we set the transfer group to link the transfers to this payment
-      transfer_group: `order_${Date.now()}`,
     }
-
-    console.log("Transfer data for payment intent:", JSON.stringify(Object.values(transferDataItems)))
   }
 
   try {
