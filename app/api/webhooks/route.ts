@@ -101,39 +101,44 @@ async function handlePaymentIntentSucceeded(event: Stripe.Event) {
 
     // Process transfers for each vendor
     const transferResults = await Promise.allSettled(
-      Object.entries(transferGroups).map(async ([accountId, { amount }]) => {
-        try {
-          const transfer = await stripe.transfers.create({
-            amount,
-            currency: paymentIntent.currency,
-            destination: accountId,
-            source_transaction: chargeId,
-            transfer_group: paymentIntent.transfer_group,
-            description: `Transfer for order ${paymentIntent.metadata?.user_id || 'unknown'}`,
-          })
-          console.log(`Created transfer ${transfer.id} to ${accountId} for ${amount}`)
-          return transfer
-        } catch (error) {
-          console.error(`Failed to create transfer to ${accountId}:`, error)
-          throw error
-        }
-      })
-    )
-
-    // Check for failed transfers
-    const failedTransfers = transferResults.filter(r => r.status === 'rejected')
-    if (failedTransfers.length > 0) {
-      console.error(`${failedTransfers.length} transfers failed`)
-      // Here you should implement retry logic or notification to admin
+        Object.entries(transferGroups).map(async ([accountId, { amount }]) => {
+          try {
+            const transferParams: Stripe.TransferCreateParams = {
+              amount,
+              currency: paymentIntent.currency,
+              destination: accountId,
+              source_transaction: chargeId,
+              description: `Transfer for order ${paymentIntent.metadata?.user_id || 'unknown'}`,
+            }
+  
+            // Adaugă transfer_group doar dacă există
+            if (paymentIntent.transfer_group) {
+              transferParams.transfer_group = paymentIntent.transfer_group
+            }
+  
+            const transfer = await stripe.transfers.create(transferParams)
+            console.log(`Created transfer ${transfer.id} to ${accountId} for ${amount}`)
+            return transfer
+          } catch (error) {
+            console.error(`Failed to create transfer to ${accountId}:`, error)
+            throw error
+          }
+        })
+      )
+  
+      const failedTransfers = transferResults.filter(r => r.status === 'rejected')
+      if (failedTransfers.length > 0) {
+        console.error(`${failedTransfers.length} transfers failed`)
+        // Implementează logica de retry sau notificare aici
+      }
+  
+    } catch (error) {
+      console.error("Error processing transfers:", error)
+      return NextResponse.json(
+        { error: "Failed to process transfers", details: error instanceof Error ? error.message : "Unknown error" },
+        { status: 500 }
+      )
     }
-
-  } catch (error) {
-    console.error("Error processing transfers:", error)
-    return NextResponse.json(
-      { error: "Failed to process transfers", details: error instanceof Error ? error.message : "Unknown error" },
-      { status: 500 }
-    )
+  
+    return NextResponse.json({ received: true })
   }
-
-  return NextResponse.json({ received: true })
-}
