@@ -75,70 +75,64 @@ async function handleCheckoutSessionCompleted(event: Stripe.Event) {
 }
 
 async function handlePaymentIntentSucceeded(event: Stripe.Event) {
-  const paymentIntent = event.data.object as Stripe.PaymentIntent
-  console.log(`Processing successful payment intent: ${paymentIntent.id}`)
+  const paymentIntent = event.data.object as Stripe.PaymentIntent;
+  console.log(`Processing successful payment intent: ${paymentIntent.id}`);
 
-  // Check if we have transfer groups in metadata
   if (!paymentIntent.metadata?.transfer_groups) {
-    console.log("No transfer groups found in metadata")
-    return NextResponse.json({ received: true })
+    console.log("No transfer groups found in metadata");
+    return NextResponse.json({ received: true });
   }
 
   try {
     const transferGroups = JSON.parse(paymentIntent.metadata.transfer_groups) as Record<
       string,
       { amount: number; application_fee: number }
-    >
+    >;
 
-    console.log(`Processing ${Object.keys(transferGroups).length} transfers for payment ${paymentIntent.id}`)
-
-    // Get the charge ID
-    const chargeId = paymentIntent.latest_charge
+    const chargeId = paymentIntent.latest_charge;
     if (!chargeId || typeof chargeId !== "string") {
-      console.error("No valid charge ID found for payment intent")
-      return NextResponse.json({ error: "No charge ID found" }, { status: 400 })
+      console.error("No valid charge ID found");
+      return NextResponse.json({ error: "No charge ID found" }, { status: 400 });
     }
 
-    // Process transfers for each vendor
-    const transferResults = await Promise.allSettled(
-        Object.entries(transferGroups).map(async ([accountId, { amount }]) => {
-          try {
-            const transferParams: Stripe.TransferCreateParams = {
-              amount,
-              currency: paymentIntent.currency,
-              destination: accountId,
-              source_transaction: chargeId,
-              description: `Transfer for order ${paymentIntent.metadata?.user_id || 'unknown'}`,
-            }
-  
-            // Adaugă transfer_group doar dacă există
-            if (paymentIntent.transfer_group) {
-              transferParams.transfer_group = paymentIntent.transfer_group
-            }
-  
-            const transfer = await stripe.transfers.create(transferParams)
-            console.log(`Created transfer ${transfer.id} to ${accountId} for ${amount}`)
-            return transfer
-          } catch (error) {
-            console.error(`Failed to create transfer to ${accountId}:`, error)
-            throw error
-          }
-        })
-      )
-  
-      const failedTransfers = transferResults.filter(r => r.status === 'rejected')
-      if (failedTransfers.length > 0) {
-        console.error(`${failedTransfers.length} transfers failed`)
-        // Implementează logica de retry sau notificare aici
+    // Procesează fiecare transfer
+    for (const [accountId, { amount, application_fee }] of Object.entries(transferGroups)) {
+      try {
+        // 1. Creează transferul către vânzător
+        const transfer = await stripe.transfers.create({
+          amount,
+          currency: paymentIntent.currency,
+          destination: accountId,
+          source_transaction: chargeId,
+          transfer_group: paymentIntent.transfer_group || undefined,
+          description: `Transfer for order ${paymentIntent.metadata?.user_id || 'unknown'}`,
+        });
+
+        console.log(`Created transfer ${transfer.id} to ${accountId} for ${amount}`);
+
+        // 2. Creează application fee pentru platformă
+        if (application_fee > 0) {
+          const fee = await stripe.applicationFees.create({
+            amount: application_fee,
+            currency: paymentIntent.currency,
+            originating_transaction: chargeId,
+          });
+          console.log(`Created application fee ${fee.id} for ${application_fee}`);
+        }
+
+      } catch (error) {
+        console.error(`Failed processing for account ${accountId}:`, error);
+        // Poți adăuga aici notificări sau retry logic
       }
-  
-    } catch (error) {
-      console.error("Error processing transfers:", error)
-      return NextResponse.json(
-        { error: "Failed to process transfers", details: error instanceof Error ? error.message : "Unknown error" },
-        { status: 500 }
-      )
     }
-  
-    return NextResponse.json({ received: true })
+
+  } catch (error) {
+    console.error("Error processing payment intent:", error);
+    return NextResponse.json(
+      { error: "Payment processing failed", details: error instanceof Error ? error.message : "Unknown error" },
+      { status: 500 }
+    );
   }
+
+  return NextResponse.json({ received: true });
+}
