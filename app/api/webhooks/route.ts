@@ -2,7 +2,6 @@ import { NextResponse } from "next/server"
 import { headers } from "next/headers"
 import Stripe from "stripe"
 
-// Initialize Stripe with your secret key
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY as string)
 const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET as string
 
@@ -16,7 +15,6 @@ export async function POST(req: Request) {
   }
 
   let event: Stripe.Event
-
   try {
     event = stripe.webhooks.constructEvent(body, signature, webhookSecret)
   } catch (err) {
@@ -26,96 +24,116 @@ export async function POST(req: Request) {
   }
 
   // Handle the event
-  if (event.type === "checkout.session.completed") {
-    const session = event.data.object as Stripe.Checkout.Session
+  switch (event.type) {
+    case "checkout.session.completed":
+      return await handleCheckoutSessionCompleted(event)
+    case "payment_intent.succeeded":
+      return await handlePaymentIntentSucceeded(event)
+    default:
+      console.log(`Unhandled event type: ${event.type}`)
+      return NextResponse.json({ received: true })
+  }
+}
 
-    // Verify the payment status
-    if (session.payment_status === "paid") {
-      console.log(`Processing paid session: ${session.id}`)
+async function handleCheckoutSessionCompleted(event: Stripe.Event) {
+  const session = event.data.object as Stripe.Checkout.Session
 
-      // Get the payment intent ID from the session
-      const paymentIntentId = session.payment_intent as string
+  if (session.payment_status !== "paid") {
+    console.log(`Session ${session.id} not paid, skipping`)
+    return NextResponse.json({ received: true })
+  }
 
-      if (!paymentIntentId) {
-        console.error("No payment intent ID found in session")
-        return NextResponse.json({ error: "No payment intent ID found" }, { status: 400 })
-      }
+  console.log(`Processing paid session: ${session.id}`)
 
-      // Retrieve the payment intent to get transfer data
-      const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId)
-
-      // Check if we have transfer data in the metadata
-      if (paymentIntent.metadata?.transfer_data) {
-        try {
-          const transferData = JSON.parse(paymentIntent.metadata.transfer_data) as Array<{
-            amount: number
-            destination: string
-          }>
-
-          console.log(`Processing ${transferData.length} transfers for payment ${paymentIntentId}`)
-
-          // Get the charge ID
-          let chargeId: string | null = null
-
-          if (typeof paymentIntent.latest_charge === "string") {
-            chargeId = paymentIntent.latest_charge
-            console.log(`Using charge ID: ${chargeId}`)
-
-            // Create transfers for each vendor
-            for (const transfer of transferData) {
-              try {
-                const result = await stripe.transfers.create({
-                  amount: transfer.amount,
-                  currency: paymentIntent.currency,
-                  destination: transfer.destination,
-                  source_transaction: chargeId,
-                  description: `Transfer for payment ${paymentIntentId}`,
-                })
-
-                console.log(`Created transfer ${result.id} to ${transfer.destination} for ${transfer.amount}`)
-              } catch (transferError) {
-                console.error(`Error creating transfer to ${transfer.destination}:`, transferError)
-              }
-            }
-          } else {
-            console.error("No charge ID found for payment intent")
-          }
-        } catch (parseError) {
-          console.error("Error parsing transfer data from metadata:", parseError)
-        }
-      } else {
-        console.log("No transfer data found in payment intent metadata")
-      }
-
-      // Send the purchase data to the dashboard app if needed
-      try {
-        const dashboardWebhookUrl = process.env.DASHBOARD_WEBHOOK_URL
-        if (dashboardWebhookUrl) {
-          await fetch(dashboardWebhookUrl, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${process.env.DASHBOARD_API_KEY}`,
-            },
-            body: JSON.stringify({
-              user_id: session.metadata?.user_id,
-              email: session.customer_email,
-              product_id: session.metadata?.product_id,
-              product_name: session.metadata?.product_name,
-              amount_total: session.amount_total,
-              payment_status: session.payment_status,
-              stripe_session_id: session.id,
-              download_url: session.metadata?.productDev0,
-              created_at: new Date().toISOString(),
-            }),
-          })
-        }
-      } catch (error) {
-        console.error("Failed to notify dashboard:", error)
-      }
+  // Send notification to dashboard if needed
+  try {
+    const dashboardWebhookUrl = process.env.DASHBOARD_WEBHOOK_URL
+    if (dashboardWebhookUrl) {
+      await fetch(dashboardWebhookUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${process.env.DASHBOARD_API_KEY}`,
+        },
+        body: JSON.stringify({
+          user_id: session.metadata?.user_id,
+          email: session.customer_email,
+          product_ids: session.metadata?.product_ids,
+          amount_total: session.amount_total,
+          payment_status: session.payment_status,
+          stripe_session_id: session.id,
+          created_at: new Date().toISOString(),
+        }),
+      })
+      console.log("Dashboard notification sent")
     }
+  } catch (error) {
+    console.error("Failed to notify dashboard:", error)
   }
 
   return NextResponse.json({ received: true })
 }
 
+async function handlePaymentIntentSucceeded(event: Stripe.Event) {
+  const paymentIntent = event.data.object as Stripe.PaymentIntent
+  console.log(`Processing successful payment intent: ${paymentIntent.id}`)
+
+  // Check if we have transfer groups in metadata
+  if (!paymentIntent.metadata?.transfer_groups) {
+    console.log("No transfer groups found in metadata")
+    return NextResponse.json({ received: true })
+  }
+
+  try {
+    const transferGroups = JSON.parse(paymentIntent.metadata.transfer_groups) as Record<
+      string,
+      { amount: number; application_fee: number }
+    >
+
+    console.log(`Processing ${Object.keys(transferGroups).length} transfers for payment ${paymentIntent.id}`)
+
+    // Get the charge ID
+    const chargeId = paymentIntent.latest_charge
+    if (!chargeId || typeof chargeId !== "string") {
+      console.error("No valid charge ID found for payment intent")
+      return NextResponse.json({ error: "No charge ID found" }, { status: 400 })
+    }
+
+    // Process transfers for each vendor
+    const transferResults = await Promise.allSettled(
+      Object.entries(transferGroups).map(async ([accountId, { amount }]) => {
+        try {
+          const transfer = await stripe.transfers.create({
+            amount,
+            currency: paymentIntent.currency,
+            destination: accountId,
+            source_transaction: chargeId,
+            transfer_group: paymentIntent.transfer_group,
+            description: `Transfer for order ${paymentIntent.metadata?.user_id || 'unknown'}`,
+          })
+          console.log(`Created transfer ${transfer.id} to ${accountId} for ${amount}`)
+          return transfer
+        } catch (error) {
+          console.error(`Failed to create transfer to ${accountId}:`, error)
+          throw error
+        }
+      })
+    )
+
+    // Check for failed transfers
+    const failedTransfers = transferResults.filter(r => r.status === 'rejected')
+    if (failedTransfers.length > 0) {
+      console.error(`${failedTransfers.length} transfers failed`)
+      // Here you should implement retry logic or notification to admin
+    }
+
+  } catch (error) {
+    console.error("Error processing transfers:", error)
+    return NextResponse.json(
+      { error: "Failed to process transfers", details: error instanceof Error ? error.message : "Unknown error" },
+      { status: 500 }
+    )
+  }
+
+  return NextResponse.json({ received: true })
+}
