@@ -5,7 +5,7 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY as string, {
   apiVersion: "2025-02-24.acacia",
 })
 
-// The account group ID you found
+// The account group ID
 const ACCOUNT_GROUP_ID = "acctgrp_ReaChY6ZbHKyvb"
 
 interface CartItem {
@@ -13,17 +13,15 @@ interface CartItem {
   priceId: string
   quantity: number
   stripeConnectedAccountId?: string | null
-  ConnectedAccountId?: string // Add ConnectedAccountId
   name?: string
   vendorName?: string
   vendorEmail?: string
-  transferDataItems?: Record<string, string> // Add transferDataItems
 }
 
 interface CheckoutRequest {
   items: CartItem[]
   userId: string
-  userEmail?: string // Add userEmail to the interface
+  userEmail?: string
 }
 
 export async function POST(req: Request) {
@@ -122,11 +120,13 @@ export async function POST(req: Request) {
       }
     }
 
-    // If we have connected accounts, set up the transfer group
-    if (connectedAccountIds.length > 0) {
-      sessionParams.payment_intent_data = {
-        transfer_group: ACCOUNT_GROUP_ID,
-      }
+    // Set up the payment intent data with transfer group
+    sessionParams.payment_intent_data = {
+      transfer_group: ACCOUNT_GROUP_ID,
+      // Make sure metadata is preserved
+      metadata: {
+        connected_account_ids: connectedAccountIds.join(","),
+      },
     }
 
     // Create the checkout session
@@ -154,4 +154,3 @@ export async function POST(req: Request) {
     )
   }
 }
-
