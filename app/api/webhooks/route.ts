@@ -2,21 +2,31 @@ import { NextResponse } from "next/server"
 import { headers } from "next/headers"
 import Stripe from "stripe"
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY as string)
-const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET as string
+// Initialize Stripe with your secret key
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY as string, {
+  apiVersion: "2025-02-24.acacia", // Use a recent stable version
+})
+
+// The account group ID you found
+const ACCOUNT_GROUP_ID = "acctgrp_ReaChY6ZbHKyvb"
 
 export async function POST(req: Request) {
+  console.log("Webhook received:", new Date().toISOString())
+
   const body = await req.text()
   const headersList = await headers()
   const signature = headersList.get("stripe-signature")
 
   if (!signature) {
+    console.error("Missing stripe-signature header")
     return NextResponse.json({ error: "Missing stripe-signature header" }, { status: 400 })
   }
 
   let event: Stripe.Event
+
   try {
-    event = stripe.webhooks.constructEvent(body, signature, webhookSecret)
+    event = stripe.webhooks.constructEvent(body, signature, process.env.STRIPE_WEBHOOK_SECRET as string)
+    console.log("Webhook event type:", event.type)
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : "Unknown error"
     console.error("Webhook signature verification failed:", errorMessage)
@@ -24,112 +34,90 @@ export async function POST(req: Request) {
   }
 
   // Handle the event
-  switch (event.type) {
-    case "checkout.session.completed":
-      return await handleCheckoutSessionCompleted(event)
-    case "payment_intent.succeeded":
-      return await handlePaymentIntentSucceeded(event)
-    default:
-      console.log(`Unhandled event type: ${event.type}`)
-      return NextResponse.json({ received: true })
-  }
-}
+  if (event.type === "checkout.session.completed") {
+    const session = event.data.object as Stripe.Checkout.Session
+    console.log("Processing checkout session:", session.id)
 
-async function handleCheckoutSessionCompleted(event: Stripe.Event) {
-  const session = event.data.object as Stripe.Checkout.Session
+    try {
+      // Get the payment intent ID
+      const paymentIntentId = session.payment_intent as string
+      if (!paymentIntentId) {
+        console.error("No payment intent ID in session")
+        return NextResponse.json({ received: true })
+      }
 
-  if (session.payment_status !== "paid") {
-    console.log(`Session ${session.id} not paid, skipping`)
-    return NextResponse.json({ received: true })
-  }
+      // Get the payment intent
+      const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId)
+      console.log("Payment intent retrieved:", paymentIntentId)
 
-  console.log(`Processing paid session: ${session.id}`)
+      // Check for connected account IDs in metadata
+      const connectedAccountIds = session.metadata?.connected_account_ids?.split(",") || []
 
-  // Send notification to dashboard if needed
-  try {
-    const dashboardWebhookUrl = process.env.DASHBOARD_WEBHOOK_URL
-    if (dashboardWebhookUrl) {
-      await fetch(dashboardWebhookUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${process.env.DASHBOARD_API_KEY}`,
-        },
-        body: JSON.stringify({
-          user_id: session.metadata?.user_id,
-          email: session.customer_email,
-          product_ids: session.metadata?.product_ids,
-          amount_total: session.amount_total,
-          payment_status: session.payment_status,
-          stripe_session_id: session.id,
-          created_at: new Date().toISOString(),
-        }),
-      })
-      console.log("Dashboard notification sent")
+      if (connectedAccountIds.length > 0) {
+        console.log("Found connected account IDs:", connectedAccountIds)
+
+        // Get the charge ID
+        if (typeof paymentIntent.latest_charge === "string") {
+          const chargeId = paymentIntent.latest_charge
+          console.log("Charge ID:", chargeId)
+
+          // Get the charge to verify it exists and has funds available
+          const charge = await stripe.charges.retrieve(chargeId)
+          console.log("Charge amount:", charge.amount, charge.currency)
+
+          // Calculate fee percentage (10%)
+          const feePercentage = 0.1
+
+          // Process each connected account
+          for (const accountId of connectedAccountIds) {
+            try {
+              // Get product IDs and names from metadata
+              const productIds = session.metadata?.product_ids?.split(",") || []
+              const productNames = session.metadata?.product_names?.split(",") || []
+
+              // Find products associated with this connected account
+              // This is a simplified approach - in a real system, you'd have a more precise mapping
+              const accountProducts = productIds.map((id, index) => ({
+                id,
+                name: productNames[index] || "Unknown product",
+              }))
+
+              if (accountProducts.length > 0) {
+                // Calculate a simple amount (total divided by number of vendors)
+                // In a real system, you'd calculate the exact amount for each vendor's products
+                const totalAmount = charge.amount
+                const vendorAmount = Math.floor((totalAmount * (1 - feePercentage)) / connectedAccountIds.length)
+
+                console.log(`Creating transfer to ${accountId} for ${vendorAmount} ${charge.currency}`)
+
+                // Create the transfer
+                const transfer = await stripe.transfers.create({
+                  amount: vendorAmount,
+                  currency: charge.currency,
+                  destination: accountId,
+                  source_transaction: chargeId,
+                  description: `Transfer for session ${session.id}`,
+                  // Use the account group ID
+                  transfer_group: ACCOUNT_GROUP_ID,
+                })
+
+                console.log("Transfer created:", transfer.id)
+              }
+            } catch (error) {
+              console.error(`Error processing transfer to ${accountId}:`, error)
+            }
+          }
+        } else {
+          console.error("No charge ID available")
+        }
+      } else {
+        console.log("No connected account IDs found in session metadata")
+      }
+    } catch (error) {
+      console.error("Error processing webhook:", error)
     }
-  } catch (error) {
-    console.error("Failed to notify dashboard:", error)
   }
 
   return NextResponse.json({ received: true })
 }
 
-async function handlePaymentIntentSucceeded(event: Stripe.Event) {
-  const paymentIntent = event.data.object as Stripe.PaymentIntent;
-  console.log(`Processing successful payment intent: ${paymentIntent.id}`);
-
-  if (!paymentIntent.metadata?.transfer_groups) {
-    console.log("No transfer groups found in metadata");
-    return NextResponse.json({ received: true });
-  }
-
-  try {
-    const transferGroups = JSON.parse(paymentIntent.metadata.transfer_groups) as Record<
-      string,
-      { amount: number; application_fee: number }
-    >;
-
-    const chargeId = paymentIntent.latest_charge;
-    if (!chargeId || typeof chargeId !== "string") {
-      console.error("No valid charge ID found");
-      return NextResponse.json({ error: "No charge ID found" }, { status: 400 });
-    }
-
-    // Process each transfer
-    for (const [accountId, { amount, application_fee }] of Object.entries(transferGroups)) {
-      try {
-        // 1. Create transfer to vendor
-        const transfer = await stripe.transfers.create({
-          amount,
-          currency: paymentIntent.currency,
-          destination: accountId,
-          source_transaction: chargeId,
-          transfer_group: paymentIntent.transfer_group || undefined,
-          description: `Transfer for order ${paymentIntent.metadata?.user_id || 'unknown'}`,
-        });
-
-        console.log(`Created transfer ${transfer.id} to ${accountId} for ${amount}`);
-
-        // 2. For application fees, they are now automatically created with the payment intent
-        // when using on_behalf_of and transfer_data parameters
-        // No need to manually create application fees anymore
-        if (application_fee > 0) {
-          console.log(`Application fee of ${application_fee} automatically processed`);
-        }
-
-      } catch (error) {
-        console.error(`Failed processing for account ${accountId}:`, error);
-        // Add retry logic or notifications here
-      }
-    }
-
-  } catch (error) {
-    console.error("Error processing payment intent:", error);
-    return NextResponse.json(
-      { error: "Payment processing failed", details: error instanceof Error ? error.message : "Unknown error" },
-      { status: 500 }
-    );
-  }
-
-  return NextResponse.json({ received: true });
-}

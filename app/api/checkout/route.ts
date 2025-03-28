@@ -1,16 +1,23 @@
 import { NextResponse } from "next/server"
 import Stripe from "stripe"
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY as string)
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY as string, {
+  apiVersion: "2025-02-24.acacia",
+})
+
+// The account group ID you found
+const ACCOUNT_GROUP_ID = "acctgrp_ReaChY6ZbHKyvb"
 
 interface CartItem {
   id: string
   priceId: string
   quantity: number
   stripeConnectedAccountId?: string | null
+  ConnectedAccountId?: string // Add ConnectedAccountId
   name?: string
   vendorName?: string
   vendorEmail?: string
+  transferDataItems?: Record<string, string> // Add transferDataItems
 }
 
 interface CheckoutRequest {
@@ -24,7 +31,7 @@ export async function POST(req: Request) {
   if (req.method === "OPTIONS") {
     return new Response(null, {
       headers: {
-        "Access-Control-Allow-Origin": "https://ui-app.com", // Allow requests from any origin
+        "Access-Control-Allow-Origin": "https://ui-app.com",
         "Access-Control-Allow-Methods": "POST, OPTIONS",
         "Access-Control-Allow-Headers": "Content-Type",
       },
@@ -48,94 +55,92 @@ export async function POST(req: Request) {
       )
     }
 
-    // Log the items with their Connected Account IDs
+    // Filter items to only include those with connected account IDs
+    const connectedItems = items.filter((item) => item.stripeConnectedAccountId)
+
     console.log(
       "Items with Connected Account IDs:",
-      items.map((item) => ({
+      connectedItems.map((item) => ({
         id: item.id,
         name: item.name,
-        stripeConnectedAccountId: item.stripeConnectedAccountId || "none",
+        stripeConnectedAccountId: item.stripeConnectedAccountId,
       })),
     )
 
-    // Group items by Stripe account ID
-    const itemsByAccount: Record<string, CartItem[]> = {}
+    // Get the base URL for success and cancel URLs
+    const baseUrl = process.env.FRONTEND_URL || "https://ui-app.com"
 
-    // Default group for items without a Stripe account ID
-    itemsByAccount["platform"] = []
+    // Prepare line items for the checkout session
+    const lineItems: Stripe.Checkout.SessionCreateParams.LineItem[] = []
 
-    // Group items by their Stripe Connected Account ID
-    items.forEach((item) => {
-      if (item.stripeConnectedAccountId) {
-        if (!itemsByAccount[item.stripeConnectedAccountId]) {
-          itemsByAccount[item.stripeConnectedAccountId] = []
+    // Add each item to the checkout
+    for (const item of items) {
+      lineItems.push({
+        price: item.priceId,
+        quantity: item.quantity,
+      })
+    }
+
+    // Extract connected account IDs
+    const connectedAccountIds = connectedItems
+      .map((item) => item.stripeConnectedAccountId)
+      .filter((id): id is string => !!id)
+
+    // Prepare session parameters
+    const sessionParams: Stripe.Checkout.SessionCreateParams = {
+      payment_method_types: ["card"],
+      mode: "payment",
+      line_items: lineItems,
+      success_url: `${baseUrl}/success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${baseUrl}/cancel`,
+      metadata: {
+        user_id: userId,
+        product_ids: items.map((item) => item.id).join(","),
+        product_names: items.map((item) => item.name || "").join(","),
+        vendor_names: items.map((item) => item.vendorName || "").join(","),
+        vendor_emails: items.map((item) => item.vendorEmail || "").join(","),
+        connected_account_ids: connectedAccountIds.join(","),
+      },
+    }
+
+    // If we have a user email, try to find an existing customer
+    if (userEmail) {
+      try {
+        const customers = await stripe.customers.list({
+          email: userEmail,
+          limit: 1,
+        })
+
+        if (customers.data.length > 0) {
+          sessionParams.customer = customers.data[0].id
+        } else {
+          sessionParams.customer_email = userEmail
         }
-        itemsByAccount[item.stripeConnectedAccountId].push(item)
-      } else {
-        itemsByAccount["platform"].push(item)
+      } catch (error) {
+        console.error("Error finding customer:", error)
+        sessionParams.customer_email = userEmail
       }
-    })
-
-    console.log("Items grouped by account:", Object.keys(itemsByAccount))
-
-    // If we only have platform items or items from a single account, create a single checkout session
-    if (
-      Object.keys(itemsByAccount).length === 1 ||
-      (Object.keys(itemsByAccount).length === 2 && itemsByAccount["platform"].length === 0)
-    ) {
-      // Get the account ID (if any)
-      const accountId = Object.keys(itemsByAccount).find((id) => id !== "platform")
-
-      console.log(`Creating single checkout session with account ID: ${accountId || "platform"}`)
-
-      // Create the checkout session
-      const session = await createCheckoutSession(
-        items,
-        userId,
-        userEmail, // Pass userEmail to createCheckoutSession
-        accountId && accountId !== "platform" ? accountId : undefined,
-      )
-
-      return NextResponse.json(
-        { url: session.url },
-        {
-          headers: {
-            "Access-Control-Allow-Origin": "https://ui-app.com",
-          },
-        },
-      )
     }
-    // If we have items from multiple accounts, we need to handle this differently
-    else {
-      console.log("Creating multiple checkout sessions for different accounts")
 
-      // For simplicity in this example, we'll create a checkout session for each account
-      // and return the URL for the first one
-      // In a real implementation, you'd need a more sophisticated approach
-
-      const sessions = await Promise.all(
-        Object.entries(itemsByAccount).map(async ([accountId, accountItems]) => {
-          if (accountId === "platform") {
-            return createCheckoutSession(accountItems, userId, userEmail)
-          } else {
-            return createCheckoutSession(accountItems, userId, userEmail, accountId)
-          }
-        }),
-      )
-
-      // For this example, just return the first session URL
-      // In a real implementation, you might want to create a custom checkout page
-      // that handles multiple sessions
-
-      return NextResponse.json(
-        { url: sessions[0].url },
-        {
-          headers: {
-            "Access-Control-Allow-Origin": "https://ui-app.com",
-          },
-        },
-      )
+    // If we have connected accounts, set up the transfer group
+    if (connectedAccountIds.length > 0) {
+      sessionParams.payment_intent_data = {
+        transfer_group: ACCOUNT_GROUP_ID,
+      }
     }
+
+    // Create the checkout session
+    const session = await stripe.checkout.sessions.create(sessionParams)
+    console.log(`Created checkout session: ${session.id}, URL: ${session.url}`)
+
+    return NextResponse.json(
+      { url: session.url },
+      {
+        headers: {
+          "Access-Control-Allow-Origin": "https://ui-app.com",
+        },
+      },
+    )
   } catch (error) {
     console.error("Checkout API error:", error)
     return NextResponse.json(
@@ -147,117 +152,6 @@ export async function POST(req: Request) {
         },
       },
     )
-  }
-}
-
-// Helper function to find existing customer by email
-async function findCustomerByEmail(email: string): Promise<string | null> {
-  if (!email) return null
-
-  try {
-    // Search for customers with the given email
-    const customers = await stripe.customers.list({
-      email: email,
-      limit: 1,
-    })
-
-    // If a customer with this email exists, return their ID
-    if (customers.data.length > 0) {
-      console.log(`Found existing customer with email ${email}: ${customers.data[0].id}`)
-      return customers.data[0].id
-    }
-
-    return null
-  } catch (error) {
-    console.error("Error finding customer by email:", error)
-    return null
-  }
-}
-
-// Helper function to create a checkout session
-async function createCheckoutSession(
-  items: CartItem[],
-  userId: string,
-  userEmail?: string,
-  stripeConnectedAccountId?: string,
-) {
-  // Calculate the application fee percentage (e.g., 10%)
-  const applicationFeePercent = 10
-
-  const lineItems = items.map((item: CartItem) => ({
-    price: item.priceId,
-    quantity: item.quantity,
-  }))
-
-  // Get the base URL for success and cancel URLs
-  const baseUrl = process.env.FRONTEND_URL || "https://ui-app.com"
-
-  const sessionParams: Stripe.Checkout.SessionCreateParams = {
-    payment_method_types: ["card"],
-    mode: "payment",
-    line_items: lineItems,
-    success_url: `${baseUrl}/success?session_id={CHECKOUT_SESSION_ID}`,
-    cancel_url: `${baseUrl}/cancel`,
-    metadata: {
-      user_id: userId,
-      product_ids: items.map((item: CartItem) => item.id).join(","),
-      product_names: items.map((item: CartItem) => item.name || "").join(","),
-      vendor_names: items.map((item: CartItem) => item.vendorName || "").join(","),
-      vendor_emails: items.map((item: CartItem) => item.vendorEmail || "").join(","),
-    },
-  }
-
-  // If we have a user email, try to find an existing customer
-  if (userEmail) {
-    const existingCustomerId = await findCustomerByEmail(userEmail)
-
-    if (existingCustomerId) {
-      // Use the existing customer ID
-      sessionParams.customer = existingCustomerId
-    } else {
-      // If no existing customer, set the email for the new customer
-      sessionParams.customer_email = userEmail
-    }
-  }
-
-  // If we have a Stripe Connected Account ID, add it to the session params
-  if (stripeConnectedAccountId) {
-    console.log(`Creating checkout session with Connected Account: ${stripeConnectedAccountId}`)
-
-    // Get the total amount for these items to calculate the application fee
-    let totalAmount = 0
-    for (const item of items) {
-      try {
-        const price = await stripe.prices.retrieve(item.priceId)
-        if (price.unit_amount) {
-          totalAmount += price.unit_amount * item.quantity
-        }
-      } catch (err) {
-        console.error(`Error retrieving price ${item.priceId}:`, err)
-      }
-    }
-
-    // Calculate the application fee amount
-    const applicationFeeAmount = Math.round(totalAmount * (applicationFeePercent / 100))
-
-    console.log(`Total amount: ${totalAmount}, Application fee: ${applicationFeeAmount}`)
-
-    // Add the payment_intent_data with the application fee and transfer data
-    sessionParams.payment_intent_data = {
-      application_fee_amount: applicationFeeAmount,
-      transfer_data: {
-        destination: stripeConnectedAccountId,
-      },
-    }
-  }
-
-  try {
-    const session = await stripe.checkout.sessions.create(sessionParams)
-    console.log(`Created checkout session: ${session.id}, URL: ${session.url}`)
-    return session
-  } catch (error) {
-    console.error("Error creating checkout session:", error)
-    throw error
   }
 }
 
