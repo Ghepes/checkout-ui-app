@@ -5,9 +5,6 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY as string, {
   apiVersion: "2025-02-24.acacia",
 })
 
-// The account group ID
-const ACCOUNT_GROUP_ID = "acctgrp_ReaChY6ZbHKyvb"
-
 interface CartItem {
   id: string
   priceId: string
@@ -22,6 +19,8 @@ interface CheckoutRequest {
   items: CartItem[]
   userId: string
   userEmail?: string
+  accountGroupId?: string
+  connectedAccountIds?: string[]
 }
 
 export async function POST(req: Request) {
@@ -29,7 +28,7 @@ export async function POST(req: Request) {
   if (req.method === "OPTIONS") {
     return new Response(null, {
       headers: {
-        "Access-Control-Allow-Origin": "https://ui-app.com",
+        "Access-Control-Allow-Origin": "*",
         "Access-Control-Allow-Methods": "POST, OPTIONS",
         "Access-Control-Allow-Headers": "Content-Type",
       },
@@ -37,9 +36,21 @@ export async function POST(req: Request) {
   }
 
   try {
-    const { items, userId, userEmail }: CheckoutRequest = await req.json()
+    const {
+      items,
+      userId,
+      userEmail,
+      accountGroupId = "acctgrp_ReaChY6ZbHKyvb",
+      connectedAccountIds = [],
+    }: CheckoutRequest = await req.json()
 
-    console.log("Checkout server received request:", { userId, userEmail, itemCount: items.length })
+    console.log("Checkout server received request:", {
+      userId,
+      userEmail,
+      itemCount: items.length,
+      accountGroupId,
+      connectedAccountIds,
+    })
 
     if (!items || !items.length) {
       return NextResponse.json(
@@ -47,23 +58,11 @@ export async function POST(req: Request) {
         {
           status: 400,
           headers: {
-            "Access-Control-Allow-Origin": "https://ui-app.com",
+            "Access-Control-Allow-Origin": "*",
           },
         },
       )
     }
-
-    // Filter items to only include those with connected account IDs
-    const connectedItems = items.filter((item) => item.stripeConnectedAccountId)
-
-    console.log(
-      "Items with Connected Account IDs:",
-      connectedItems.map((item) => ({
-        id: item.id,
-        name: item.name,
-        stripeConnectedAccountId: item.stripeConnectedAccountId,
-      })),
-    )
 
     // Get the base URL for success and cancel URLs
     const baseUrl = process.env.FRONTEND_URL || "https://ui-app.com"
@@ -79,10 +78,15 @@ export async function POST(req: Request) {
       })
     }
 
-    // Extract connected account IDs
-    const connectedAccountIds = connectedItems
+    // Extract connected account IDs from items if not provided
+    const itemConnectedAccountIds = items
       .map((item) => item.stripeConnectedAccountId)
       .filter((id): id is string => !!id)
+
+    // Use provided connected account IDs or extract from items
+    const finalConnectedAccountIds = connectedAccountIds.length > 0 ? connectedAccountIds : itemConnectedAccountIds
+
+    console.log("Final connected account IDs:", finalConnectedAccountIds)
 
     // Prepare session parameters
     const sessionParams: Stripe.Checkout.SessionCreateParams = {
@@ -97,7 +101,7 @@ export async function POST(req: Request) {
         product_names: items.map((item) => item.name || "").join(","),
         vendor_names: items.map((item) => item.vendorName || "").join(","),
         vendor_emails: items.map((item) => item.vendorEmail || "").join(","),
-        connected_account_ids: connectedAccountIds.join(","),
+        connected_account_ids: finalConnectedAccountIds.join(","),
       },
     }
 
@@ -120,12 +124,11 @@ export async function POST(req: Request) {
       }
     }
 
-    // Set up the payment intent data with transfer group
+    // Set up the payment intent data with transfer group and metadata
     sessionParams.payment_intent_data = {
-      transfer_group: ACCOUNT_GROUP_ID,
-      // Make sure metadata is preserved
+      transfer_group: accountGroupId,
       metadata: {
-        connected_account_ids: connectedAccountIds.join(","),
+        connected_account_ids: finalConnectedAccountIds.join(","),
       },
     }
 
@@ -137,7 +140,7 @@ export async function POST(req: Request) {
       { url: session.url },
       {
         headers: {
-          "Access-Control-Allow-Origin": "https://ui-app.com",
+          "Access-Control-Allow-Origin": "*",
         },
       },
     )
@@ -148,7 +151,7 @@ export async function POST(req: Request) {
       {
         status: 500,
         headers: {
-          "Access-Control-Allow-Origin": "https://ui-app.com",
+          "Access-Control-Allow-Origin": "*",
         },
       },
     )
