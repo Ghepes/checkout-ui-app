@@ -95,6 +95,7 @@ export async function POST(req: Request) {
       line_items: lineItems,
       success_url: `${baseUrl}/success?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${baseUrl}/cancel`,
+      automatic_tax: { enabled: true },
       metadata: {
         user_id: userId,
         product_ids: items.map((item) => item.id).join(","),
