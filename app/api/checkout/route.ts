@@ -2,7 +2,7 @@ import { NextResponse } from "next/server"
 import Stripe from "stripe"
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY as string, {
-  apiVersion: "2025-02-24.acacia",
+  apiVersion: "2023-10-16",
 })
 
 interface CartItem {
@@ -40,7 +40,7 @@ export async function POST(req: Request) {
       items,
       userId,
       userEmail,
-      accountGroupId = "acctgrp_ReaChY6ZbHKyvb",
+      accountGroupId = "acctgrp_S38FZGJsPr1nRk", // Updated to your actual account group
       connectedAccountIds = [],
     }: CheckoutRequest = await req.json()
 
@@ -95,7 +95,6 @@ export async function POST(req: Request) {
       line_items: lineItems,
       success_url: `${baseUrl}/success?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${baseUrl}/cancel`,
-      automatic_tax: { enabled: true },
       metadata: {
         user_id: userId,
         product_ids: items.map((item) => item.id).join(","),
