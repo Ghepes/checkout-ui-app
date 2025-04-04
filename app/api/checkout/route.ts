@@ -2,8 +2,14 @@ import { NextResponse } from "next/server"
 import Stripe from "stripe"
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY as string, {
-  apiVersion: "2025-02-24.acacia",
+  apiVersion: "2023-10-16",
 })
+
+// The correct transfer group ID
+const ACCOUNT_GROUP_ID = "default"
+
+// The payments pricing group ID - this is used for connected accounts
+const PAYMENTS_PRICING_GROUP_ID = "acctgrp_S38FZGJsPr1nRk"
 
 interface CartItem {
   id: string
@@ -40,7 +46,7 @@ export async function POST(req: Request) {
       items,
       userId,
       userEmail,
-      accountGroupId = "acctgrp_S38FZGJsPr1nRk", // Updated to your actual account group
+      accountGroupId = ACCOUNT_GROUP_ID, // Use the correct account group ID
       connectedAccountIds = [],
     }: CheckoutRequest = await req.json()
 
@@ -88,6 +94,12 @@ export async function POST(req: Request) {
 
     console.log("Final connected account IDs:", finalConnectedAccountIds)
 
+    // Create product-to-connected-account mapping for better tracking
+    const productConnectedAccounts = items
+      .filter((item) => item.stripeConnectedAccountId)
+      .map((item) => `${item.id}:${item.stripeConnectedAccountId}`)
+      .join(",")
+
     // Prepare session parameters
     const sessionParams: Stripe.Checkout.SessionCreateParams = {
       payment_method_types: ["card"],
@@ -102,6 +114,8 @@ export async function POST(req: Request) {
         vendor_names: items.map((item) => item.vendorName || "").join(","),
         vendor_emails: items.map((item) => item.vendorEmail || "").join(","),
         connected_account_ids: finalConnectedAccountIds.join(","),
+        product_connected_accounts: productConnectedAccounts,
+        payments_pricing_group_id: PAYMENTS_PRICING_GROUP_ID,
       },
     }
 
@@ -129,6 +143,8 @@ export async function POST(req: Request) {
       transfer_group: accountGroupId,
       metadata: {
         connected_account_ids: finalConnectedAccountIds.join(","),
+        product_connected_accounts: productConnectedAccounts,
+        payments_pricing_group_id: PAYMENTS_PRICING_GROUP_ID,
       },
     }
 

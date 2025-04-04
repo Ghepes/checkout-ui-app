@@ -4,11 +4,14 @@ import Stripe from "stripe"
 
 // Initialize Stripe with your secret key
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY as string, {
-  apiVersion: "2025-02-24.acacia",
+  apiVersion: "2023-10-16",
 })
 
-// The account group ID - updated to your actual account group
-const ACCOUNT_GROUP_ID = "acctgrp_S38FZGJsPr1nRk"
+// The correct transfer group ID
+const ACCOUNT_GROUP_ID = "default"
+
+// The payments pricing group ID - this is used for connected accounts
+const PAYMENTS_PRICING_GROUP_ID = "acctgrp_S38FZGJsPr1nRk"
 
 // Function to create transfers to connected accounts
 async function createTransfersToConnectedAccounts(
@@ -24,42 +27,146 @@ async function createTransfersToConnectedAccounts(
 
   console.log(`Creating transfers for charge ${chargeId} to ${connectedAccountIds.length} connected accounts`)
 
-  // Calculate fee percentage (10%)
-  const feePercentage = 0.1
-  const platformFee = Math.floor(amount * feePercentage)
-  const amountPerVendor = Math.floor((amount - platformFee) / connectedAccountIds.length)
+  try {
+    // First, try to get the session that created this charge to get line items
+    const paymentIntent = await stripe.paymentIntents.retrieve(
+      chargeId.startsWith("ch_") ? ((await stripe.charges.retrieve(chargeId)).payment_intent as string) : chargeId,
+    )
 
-  console.log(`Total amount: ${amount}, Platform fee: ${platformFee}, Amount per vendor: ${amountPerVendor}`)
+    // Get the checkout session from the payment intent
+    const sessions = await stripe.checkout.sessions.list({
+      payment_intent: paymentIntent.id,
+      limit: 1,
+      expand: ["data.line_items", "data.line_items.data.price.product"],
+    })
 
-  for (const accountId of connectedAccountIds) {
-    try {
-      // Check if a transfer already exists for this charge and destination
-      const existingTransfers = await stripe.transfers.list({
-        destination: accountId,
-        transfer_group: ACCOUNT_GROUP_ID,
-        limit: 10,
-      })
+    if (sessions.data.length > 0) {
+      const session = sessions.data[0]
 
-      if (existingTransfers.data.some((t) => t.source_transaction === chargeId)) {
-        console.log(`Transfer already exists for charge ${chargeId} to account ${accountId}`)
-        continue
+      // Get product-specific connected account mappings if available
+      const productConnectedAccounts = session.metadata?.product_connected_accounts
+        ? session.metadata.product_connected_accounts.split(",").reduce((acc: Record<string, string>, item: string) => {
+            const [productId, accountId] = item.split(":")
+            if (productId && accountId) {
+              acc[productId] = accountId
+            }
+            return acc
+          }, {})
+        : {}
+
+      // Get line items with their connected accounts
+      const lineItems =
+        session.line_items?.data
+          .map((item) => {
+            const product = item.price?.product as Stripe.Product
+            const productId = product?.id
+
+            return {
+              productId,
+              amount: item.amount_subtotal,
+              quantity: item.quantity,
+              connectedAccountId: productConnectedAccounts[productId] || product?.metadata?.stripeConnectedAccountId,
+            }
+          })
+          .filter((item) => item.connectedAccountId && connectedAccountIds.includes(item.connectedAccountId)) || []
+
+      if (lineItems.length > 0) {
+        console.log("Processing line items with connected accounts:", lineItems)
+
+        // Group by connected account ID
+        const accountAmounts: Record<string, number> = {}
+
+        // Calculate total amount per connected account
+        for (const item of lineItems) {
+          if (item.connectedAccountId) {
+            accountAmounts[item.connectedAccountId] = (accountAmounts[item.connectedAccountId] || 0) + item.amount
+          }
+        }
+
+        // Create transfers for each account
+        for (const [accountId, accountAmount] of Object.entries(accountAmounts)) {
+          try {
+            // Check if a transfer already exists
+            const existingTransfers = await stripe.transfers.list({
+              destination: accountId,
+              transfer_group: ACCOUNT_GROUP_ID,
+              limit: 10,
+            })
+
+            if (existingTransfers.data.some((t) => t.source_transaction === chargeId)) {
+              console.log(`Transfer already exists for charge ${chargeId} to account ${accountId}`)
+              continue
+            }
+
+            // Calculate fee (10%)
+            const platformFee = Math.floor(accountAmount * 0.1)
+            const transferAmount = accountAmount - platformFee
+
+            console.log(
+              `Creating transfer to ${accountId} for ${transferAmount} ${currency} (original: ${accountAmount}, fee: ${platformFee})`,
+            )
+
+            const transfer = await stripe.transfers.create({
+              amount: transferAmount,
+              currency: currency,
+              destination: accountId,
+              source_transaction: chargeId,
+              description: `Transfer for charge ${chargeId}`,
+              transfer_group: ACCOUNT_GROUP_ID,
+            })
+
+            console.log("Transfer created successfully:", transfer.id)
+          } catch (error) {
+            console.error(`Error creating transfer to ${accountId}:`, error)
+          }
+        }
+
+        return
       }
-
-      console.log(`Creating transfer to ${accountId} for ${amountPerVendor} ${currency}`)
-
-      const transfer = await stripe.transfers.create({
-        amount: amountPerVendor,
-        currency: currency,
-        destination: accountId,
-        source_transaction: chargeId,
-        description: `Transfer for charge ${chargeId}`,
-        transfer_group: ACCOUNT_GROUP_ID,
-      })
-
-      console.log("Transfer created successfully:", transfer.id)
-    } catch (error) {
-      console.error(`Error creating transfer to ${accountId}:`, error)
     }
+
+    // Fallback to the original logic if no line items found
+    console.log("No line items found, using fallback logic")
+
+    // Calculate fee percentage (10%)
+    const feePercentage = 0.1
+    const platformFee = Math.floor(amount * feePercentage)
+    const amountPerVendor = Math.floor((amount - platformFee) / connectedAccountIds.length)
+
+    console.log(`Total amount: ${amount}, Platform fee: ${platformFee}, Amount per vendor: ${amountPerVendor}`)
+
+    for (const accountId of connectedAccountIds) {
+      try {
+        // Check if a transfer already exists for this charge and destination
+        const existingTransfers = await stripe.transfers.list({
+          destination: accountId,
+          transfer_group: ACCOUNT_GROUP_ID,
+          limit: 10,
+        })
+
+        if (existingTransfers.data.some((t) => t.source_transaction === chargeId)) {
+          console.log(`Transfer already exists for charge ${chargeId} to account ${accountId}`)
+          continue
+        }
+
+        console.log(`Creating transfer to ${accountId} for ${amountPerVendor} ${currency}`)
+
+        const transfer = await stripe.transfers.create({
+          amount: amountPerVendor,
+          currency: currency,
+          destination: accountId,
+          source_transaction: chargeId,
+          description: `Transfer for charge ${chargeId}`,
+          transfer_group: ACCOUNT_GROUP_ID,
+        })
+
+        console.log("Transfer created successfully:", transfer.id)
+      } catch (error) {
+        console.error(`Error creating transfer to ${accountId}:`, error)
+      }
+    }
+  } catch (error) {
+    console.error("Error in createTransfersToConnectedAccounts:", error)
   }
 }
 
@@ -67,7 +174,7 @@ export async function POST(req: Request) {
   console.log("Webhook received:", new Date().toISOString())
 
   const body = await req.text()
-  const headersList = await headers()
+  const headersList = headers()
   const signature = headersList.get("stripe-signature")
 
   if (!signature) {
@@ -188,38 +295,12 @@ export async function POST(req: Request) {
         const paymentIntentId =
           typeof charge.payment_intent === "string" ? charge.payment_intent : charge.payment_intent.id
 
+        // Get the payment intent
         const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId)
         console.log("Payment intent retrieved:", paymentIntentId)
 
         // Get connected account IDs from payment intent metadata
         const connectedAccountIds = paymentIntent.metadata?.connected_account_ids?.split(",").filter(Boolean) || []
-
-        // If no connected account IDs in payment intent metadata, try to find the session
-        if (connectedAccountIds.length === 0) {
-          const sessions = await stripe.checkout.sessions.list({
-            payment_intent: paymentIntentId,
-            limit: 1,
-          })
-
-          if (sessions.data.length > 0) {
-            const session = sessions.data[0]
-            const sessionConnectedAccountIds = session.metadata?.connected_account_ids?.split(",").filter(Boolean) || []
-
-            if (sessionConnectedAccountIds.length > 0) {
-              console.log("Found connected account IDs in session:", sessionConnectedAccountIds)
-
-              // Create transfers to connected accounts
-              await createTransfersToConnectedAccounts(
-                charge.id,
-                sessionConnectedAccountIds,
-                charge.amount,
-                charge.currency,
-              )
-
-              return NextResponse.json({ received: true })
-            }
-          }
-        }
 
         // Create transfers to connected accounts
         await createTransfersToConnectedAccounts(charge.id, connectedAccountIds, charge.amount, charge.currency)
