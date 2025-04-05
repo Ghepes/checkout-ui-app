@@ -13,6 +13,32 @@ const ACCOUNT_GROUP_ID = "default"
 // The payments pricing group ID - this is used for connected accounts
 const PAYMENTS_PRICING_GROUP_ID = "acctgrp_S38FZGJsPr1nRk"
 
+/**
+ * Find the primary customer ID for a given customer
+ * Handles cases where the customer is a duplicate
+ */
+async function getPrimaryCustomerId(customerId: string): Promise<string> {
+  try {
+    const customer = await stripe.customers.retrieve(customerId)
+
+    // If this customer is marked as a duplicate, return its primary customer ID
+    if (
+      customer &&
+      !customer.deleted &&
+      customer.metadata?.is_duplicate === "true" &&
+      customer.metadata?.primary_customer_id
+    ) {
+      return customer.metadata.primary_customer_id
+    }
+
+    // Otherwise, return the original customer ID
+    return customerId
+  } catch (error) {
+    console.error(`Error getting primary customer ID for ${customerId}:`, error)
+    return customerId
+  }
+}
+
 // Function to create transfers to connected accounts
 async function createTransfersToConnectedAccounts(
   chargeId: string,
@@ -262,7 +288,7 @@ export async function POST(req: Request) {
   console.log("Webhook received:", new Date().toISOString())
 
   const body = await req.text()
-  const headersList = await headers()
+  const headersList = headers()
   const signature = headersList.get("stripe-signature")
 
   if (!signature) {
@@ -287,6 +313,29 @@ export async function POST(req: Request) {
     console.log("Processing checkout session:", session.id)
 
     try {
+      // If the session has a customer ID, get the primary customer ID
+      if (session.customer) {
+        const customerId = typeof session.customer === "string" ? session.customer : session.customer.id
+
+        const primaryCustomerId = await getPrimaryCustomerId(customerId)
+
+        // If the primary customer ID is different, update the session metadata
+        if (primaryCustomerId !== customerId) {
+          console.log(
+            `Updating session ${session.id} to use primary customer ${primaryCustomerId} instead of ${customerId}`,
+          )
+
+          // Update the session metadata to include the primary customer ID
+          await stripe.checkout.sessions.update(session.id, {
+            metadata: {
+              ...session.metadata,
+              original_customer_id: customerId,
+              primary_customer_id: primaryCustomerId,
+            },
+          })
+        }
+      }
+
       // Check if this is a multi-vendor checkout
       const isMultiVendor = session.metadata?.is_multi_vendor === "true"
 

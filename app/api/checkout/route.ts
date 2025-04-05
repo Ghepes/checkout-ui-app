@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server"
 import Stripe from "stripe"
+import { findStripeCustomerByEmail } from "@/lib/stripe-customers"
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY as string, {
   apiVersion: "2025-02-24.acacia",
@@ -143,13 +144,13 @@ export async function POST(req: Request) {
       // If we have a user email, try to find an existing customer
       if (userEmail) {
         try {
-          const customers = await stripe.customers.list({
-            email: userEmail,
-            limit: 1,
-          })
+          // Use our enhanced customer lookup
+          const { customerId, exists } = await findStripeCustomerByEmail(userEmail)
 
-          if (customers.data.length > 0) {
-            sessionParams.customer = customers.data[0].id
+          if (exists && customerId) {
+            sessionParams.customer = customerId
+            // Prevent creating a duplicate customer
+            sessionParams.customer_creation = "if_required"
           } else {
             sessionParams.customer_email = userEmail
           }
@@ -271,13 +272,13 @@ export async function POST(req: Request) {
       // If we have a user email, try to find an existing customer
       if (userEmail) {
         try {
-          const customers = await stripe.customers.list({
-            email: userEmail,
-            limit: 1,
-          })
+          // Use our enhanced customer lookup
+          const { customerId, exists } = await findStripeCustomerByEmail(userEmail)
 
-          if (customers.data.length > 0) {
-            sessionParams.customer = customers.data[0].id
+          if (exists && customerId) {
+            sessionParams.customer = customerId
+            // Prevent creating a duplicate customer
+            sessionParams.customer_creation = "if_required"
           } else {
             sessionParams.customer_email = userEmail
           }
