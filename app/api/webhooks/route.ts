@@ -4,7 +4,7 @@ import Stripe from "stripe"
 
 // Initialize Stripe with your secret key
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY as string, {
-  apiVersion: "2023-10-16",
+  apiVersion: "2025-02-24.acacia",
 })
 
 // The correct transfer group ID
@@ -31,7 +31,17 @@ async function createTransfersToConnectedAccounts(
     // First, try to get the session that created this charge to get line items
     const paymentIntent = await stripe.paymentIntents.retrieve(
       chargeId.startsWith("ch_") ? ((await stripe.charges.retrieve(chargeId)).payment_intent as string) : chargeId,
+      {
+        expand: ["transfer", "application_fee"],
+      },
     )
+
+    // If this payment intent already has a transfer, it means it was created with transfer_data
+    // and the application_fee_amount, so we don't need to create a separate transfer
+    if (paymentIntent.transfer) {
+      console.log(`Payment intent ${paymentIntent.id} already has a transfer: ${paymentIntent.transfer.id}`)
+      return
+    }
 
     // Get the checkout session from the payment intent
     const sessions = await stripe.checkout.sessions.list({
@@ -42,6 +52,14 @@ async function createTransfersToConnectedAccounts(
 
     if (sessions.data.length > 0) {
       const session = sessions.data[0]
+
+      // Check if this is a multi-vendor checkout
+      const isMultiVendor = session.metadata?.is_multi_vendor === "true"
+
+      if (isMultiVendor) {
+        console.log("This is part of a multi-vendor checkout - transfers are handled via application fees")
+        return
+      }
 
       // Get product-specific connected account mappings if available
       const productConnectedAccounts = session.metadata?.product_connected_accounts
@@ -106,6 +124,11 @@ async function createTransfersToConnectedAccounts(
               `Creating transfer to ${accountId} for ${transferAmount} ${currency} (original: ${accountAmount}, fee: ${platformFee})`,
             )
 
+            // Get the connected account to check its default currency
+            const connectedAccount = await stripe.accounts.retrieve(accountId)
+            const accountDefaultCurrency = connectedAccount.default_currency || currency
+
+            // Create the transfer with automatic currency conversion
             const transfer = await stripe.transfers.create({
               amount: transferAmount,
               currency: currency,
@@ -113,6 +136,11 @@ async function createTransfersToConnectedAccounts(
               source_transaction: chargeId,
               description: `Transfer for charge ${chargeId}`,
               transfer_group: ACCOUNT_GROUP_ID,
+              metadata: {
+                original_currency: currency,
+                account_currency: accountDefaultCurrency,
+                automatic_conversion: currency !== accountDefaultCurrency ? "true" : "false",
+              },
             })
 
             console.log("Transfer created successfully:", transfer.id)
@@ -149,8 +177,15 @@ async function createTransfersToConnectedAccounts(
           continue
         }
 
-        console.log(`Creating transfer to ${accountId} for ${amountPerVendor} ${currency}`)
+        // Get the connected account to check its default currency
+        const connectedAccount = await stripe.accounts.retrieve(accountId)
+        const accountDefaultCurrency = connectedAccount.default_currency || currency
 
+        console.log(
+          `Creating transfer to ${accountId} for ${amountPerVendor} ${currency} (account currency: ${accountDefaultCurrency})`,
+        )
+
+        // Create the transfer with automatic currency conversion
         const transfer = await stripe.transfers.create({
           amount: amountPerVendor,
           currency: currency,
@@ -158,6 +193,11 @@ async function createTransfersToConnectedAccounts(
           source_transaction: chargeId,
           description: `Transfer for charge ${chargeId}`,
           transfer_group: ACCOUNT_GROUP_ID,
+          metadata: {
+            original_currency: currency,
+            account_currency: accountDefaultCurrency,
+            automatic_conversion: currency !== accountDefaultCurrency ? "true" : "false",
+          },
         })
 
         console.log("Transfer created successfully:", transfer.id)
@@ -170,11 +210,59 @@ async function createTransfersToConnectedAccounts(
   }
 }
 
+// Function to handle multi-vendor checkout continuation
+async function handleMultiVendorContinuation(session: Stripe.Checkout.Session) {
+  try {
+    // Check if this is a multi-vendor checkout
+    if (session.metadata?.is_multi_vendor !== "true") {
+      return
+    }
+
+    const vendorCount = Number.parseInt(session.metadata?.vendor_count || "0", 10)
+    const currentVendorIndex = Number.parseInt(session.metadata?.current_vendor_index || "0", 10)
+
+    // If this is the last vendor, we're done
+    if (currentVendorIndex >= vendorCount) {
+      console.log("Multi-vendor checkout complete - all vendors processed")
+      return
+    }
+
+    // Get the next vendor from the metadata
+    const connectedAccountIds = session.metadata?.connected_account_ids?.split(",") || []
+    const allVendorIds = session.metadata?.all_vendor_ids?.split(",") || []
+
+    // If we don't have all vendor IDs stored, we can't continue
+    if (allVendorIds.length === 0) {
+      console.log("No vendor IDs found in metadata - cannot continue multi-vendor checkout")
+      return
+    }
+
+    const nextVendorIndex = currentVendorIndex + 1
+    if (nextVendorIndex >= allVendorIds.length) {
+      console.log("No more vendors to process")
+      return
+    }
+
+    const nextVendorId = allVendorIds[nextVendorIndex]
+
+    // We would need to create the next checkout session here, but this requires
+    // more context about the items for the next vendor, which we don't have in this webhook
+    console.log(`Next vendor to process: ${nextVendorId} (index ${nextVendorIndex})`)
+
+    // In a real implementation, you would either:
+    // 1. Store all the necessary data in the session metadata
+    // 2. Or make an API call to your backend to get the next vendor's items
+    // 3. Or redirect the user to a page that handles the next vendor checkout
+  } catch (error) {
+    console.error("Error handling multi-vendor continuation:", error)
+  }
+}
+
 export async function POST(req: Request) {
   console.log("Webhook received:", new Date().toISOString())
 
   const body = await req.text()
-  const headersList = headers()
+  const headersList = await headers()
   const signature = headersList.get("stripe-signature")
 
   if (!signature) {
@@ -199,6 +287,15 @@ export async function POST(req: Request) {
     console.log("Processing checkout session:", session.id)
 
     try {
+      // Check if this is a multi-vendor checkout
+      const isMultiVendor = session.metadata?.is_multi_vendor === "true"
+
+      if (isMultiVendor) {
+        console.log("This is a multi-vendor checkout session")
+        // Handle multi-vendor continuation
+        await handleMultiVendorContinuation(session)
+      }
+
       // Get the payment intent ID
       const paymentIntentId = session.payment_intent as string
       if (!paymentIntentId) {
@@ -207,8 +304,17 @@ export async function POST(req: Request) {
       }
 
       // Get the payment intent
-      const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId)
+      const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId, {
+        expand: ["transfer", "application_fee"],
+      })
       console.log("Payment intent retrieved:", paymentIntentId)
+
+      // If this payment intent already has a transfer, it means it was created with transfer_data
+      // and the application_fee_amount, so we don't need to create a separate transfer
+      if (paymentIntent.transfer) {
+        console.log(`Payment intent ${paymentIntent.id} already has a transfer: ${paymentIntent.transfer.id}`)
+        return NextResponse.json({ received: true })
+      }
 
       // Get the charge ID
       if (typeof paymentIntent.latest_charge !== "string") {
@@ -247,6 +353,13 @@ export async function POST(req: Request) {
     console.log("Processing successful payment intent:", paymentIntent.id)
 
     try {
+      // If this payment intent already has a transfer, it means it was created with transfer_data
+      // and the application_fee_amount, so we don't need to create a separate transfer
+      if (paymentIntent.transfer) {
+        console.log(`Payment intent ${paymentIntent.id} already has a transfer: ${paymentIntent.transfer.id}`)
+        return NextResponse.json({ received: true })
+      }
+
       // Get the charge ID
       if (typeof paymentIntent.latest_charge !== "string") {
         console.error("No charge ID available in payment intent")
@@ -296,8 +409,17 @@ export async function POST(req: Request) {
           typeof charge.payment_intent === "string" ? charge.payment_intent : charge.payment_intent.id
 
         // Get the payment intent
-        const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId)
+        const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId, {
+          expand: ["transfer", "application_fee"],
+        })
         console.log("Payment intent retrieved:", paymentIntentId)
+
+        // If this payment intent already has a transfer, it means it was created with transfer_data
+        // and the application_fee_amount, so we don't need to create a separate transfer
+        if (paymentIntent.transfer) {
+          console.log(`Payment intent ${paymentIntent.id} already has a transfer: ${paymentIntent.transfer.id}`)
+          return NextResponse.json({ received: true })
+        }
 
         // Get connected account IDs from payment intent metadata
         const connectedAccountIds = paymentIntent.metadata?.connected_account_ids?.split(",").filter(Boolean) || []
