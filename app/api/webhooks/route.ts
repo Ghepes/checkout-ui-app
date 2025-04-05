@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server"
 import { headers } from "next/headers"
 import Stripe from "stripe"
+import { getPrimaryCustomerId } from "@/lib/stripe-customers"
 
 // Initialize Stripe with your secret key
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY as string, {
@@ -12,32 +13,6 @@ const ACCOUNT_GROUP_ID = "default"
 
 // The payments pricing group ID - this is used for connected accounts
 const PAYMENTS_PRICING_GROUP_ID = "acctgrp_S38FZGJsPr1nRk"
-
-/**
- * Find the primary customer ID for a given customer
- * Handles cases where the customer is a duplicate
- */
-async function getPrimaryCustomerId(customerId: string): Promise<string> {
-  try {
-    const customer = await stripe.customers.retrieve(customerId)
-
-    // If this customer is marked as a duplicate, return its primary customer ID
-    if (
-      customer &&
-      !customer.deleted &&
-      customer.metadata?.is_duplicate === "true" &&
-      customer.metadata?.primary_customer_id
-    ) {
-      return customer.metadata.primary_customer_id
-    }
-
-    // Otherwise, return the original customer ID
-    return customerId
-  } catch (error) {
-    console.error(`Error getting primary customer ID for ${customerId}:`, error)
-    return customerId
-  }
-}
 
 // Function to create transfers to connected accounts
 async function createTransfersToConnectedAccounts(
