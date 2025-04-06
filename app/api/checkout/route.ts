@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server"
 import Stripe from "stripe"
-import { findStripeCustomerByEmail } from "@/lib/stripe-customers"
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY as string, {
   apiVersion: "2025-02-24.acacia",
@@ -8,9 +7,6 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY as string, {
 
 // The correct transfer group ID
 const ACCOUNT_GROUP_ID = "default"
-
-// The payments pricing group ID - this is used for connected accounts
-const PAYMENTS_PRICING_GROUP_ID = "acctgrp_S38FZGJsPr1nRk"
 
 interface CartItem {
   id: string
@@ -137,20 +133,19 @@ export async function POST(req: Request) {
           vendor_emails: items.map((item) => item.vendorEmail || "").join(","),
           connected_account_ids: finalConnectedAccountIds.join(","),
           product_connected_accounts: productConnectedAccounts,
-          payments_pricing_group_id: PAYMENTS_PRICING_GROUP_ID,
         },
       }
 
       // If we have a user email, try to find an existing customer
       if (userEmail) {
         try {
-          // Use our enhanced customer lookup
-          const { customerId, exists } = await findStripeCustomerByEmail(userEmail)
+          const customers = await stripe.customers.list({
+            email: userEmail,
+            limit: 1,
+          })
 
-          if (exists && customerId) {
-            sessionParams.customer = customerId
-            // Prevent creating a duplicate customer
-            sessionParams.customer_creation = "if_required"
+          if (customers.data.length > 0) {
+            sessionParams.customer = customers.data[0].id
           } else {
             sessionParams.customer_email = userEmail
           }
@@ -182,10 +177,7 @@ export async function POST(req: Request) {
           metadata: {
             connected_account_ids: finalConnectedAccountIds.join(","),
             product_connected_accounts: productConnectedAccounts,
-            payments_pricing_group_id: PAYMENTS_PRICING_GROUP_ID,
           },
-          automatic_payment_methods: { enabled: true },
-          automatic_currency_conversion: true, // Enable automatic currency conversion
         }
       } else {
         // Regular payment intent data for platform-only items
@@ -194,10 +186,7 @@ export async function POST(req: Request) {
           metadata: {
             connected_account_ids: finalConnectedAccountIds.join(","),
             product_connected_accounts: productConnectedAccounts,
-            payments_pricing_group_id: PAYMENTS_PRICING_GROUP_ID,
           },
-          automatic_payment_methods: { enabled: true },
-          automatic_currency_conversion: true, // Enable automatic currency conversion
         }
       }
 
@@ -261,7 +250,6 @@ export async function POST(req: Request) {
           vendor_emails: firstVendorItems.map((item) => item.vendorEmail || "").join(","),
           connected_account_ids: firstVendorId,
           product_connected_accounts: productConnectedAccounts,
-          payments_pricing_group_id: PAYMENTS_PRICING_GROUP_ID,
           is_multi_vendor: "true",
           vendor_count: vendorIds.length.toString(),
           total_amount: totalAmount.toString(),
@@ -272,13 +260,13 @@ export async function POST(req: Request) {
       // If we have a user email, try to find an existing customer
       if (userEmail) {
         try {
-          // Use our enhanced customer lookup
-          const { customerId, exists } = await findStripeCustomerByEmail(userEmail)
+          const customers = await stripe.customers.list({
+            email: userEmail,
+            limit: 1,
+          })
 
-          if (exists && customerId) {
-            sessionParams.customer = customerId
-            // Prevent creating a duplicate customer
-            sessionParams.customer_creation = "if_required"
+          if (customers.data.length > 0) {
+            sessionParams.customer = customers.data[0].id
           } else {
             sessionParams.customer_email = userEmail
           }
@@ -297,13 +285,10 @@ export async function POST(req: Request) {
         metadata: {
           connected_account_ids: firstVendorId,
           product_connected_accounts: productConnectedAccounts,
-          payments_pricing_group_id: PAYMENTS_PRICING_GROUP_ID,
           is_multi_vendor: "true",
           vendor_count: vendorIds.length.toString(),
           current_vendor_index: "1",
         },
-        automatic_payment_methods: { enabled: true },
-        automatic_currency_conversion: true, // Enable automatic currency conversion
       }
 
       // Create the checkout session for the first vendor
