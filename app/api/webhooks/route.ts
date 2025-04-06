@@ -4,7 +4,7 @@ import Stripe from "stripe"
 
 // Initialize Stripe with your secret key
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY as string, {
-  apiVersion: "2025-02-24.acacia",
+  apiVersion: "2023-10-16",
 })
 
 // The correct transfer group ID
@@ -26,12 +26,15 @@ async function createTransfersToConnectedAccounts(
 
   try {
     // First, try to get the session that created this charge to get line items
-    const paymentIntent = await stripe.paymentIntents.retrieve(
-      chargeId.startsWith("ch_") ? ((await stripe.charges.retrieve(chargeId)).payment_intent as string) : chargeId,
-      {
-        expand: ["transfer", "application_fee"],
-      },
-    )
+    const paymentIntentId = chargeId.startsWith("ch_")
+      ? ((await stripe.charges.retrieve(chargeId)).payment_intent as string)
+      : chargeId
+
+    const paymentIntent = (await stripe.paymentIntents.retrieve(paymentIntentId, {
+      expand: ["transfer", "application_fee"],
+    })) as Stripe.PaymentIntent & {
+      transfer?: Stripe.Transfer
+    }
 
     // If this payment intent already has a transfer, it means it was created with transfer_data
     // and the application_fee_amount, so we don't need to create a separate transfer
@@ -298,9 +301,12 @@ export async function POST(req: Request) {
       }
 
       // Get the payment intent
-      const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId, {
+      const paymentIntent = (await stripe.paymentIntents.retrieve(paymentIntentId, {
         expand: ["transfer", "application_fee"],
-      })
+      })) as Stripe.PaymentIntent & {
+        transfer?: Stripe.Transfer
+      }
+
       console.log("Payment intent retrieved:", paymentIntentId)
 
       // If this payment intent already has a transfer, it means it was created with transfer_data
@@ -335,7 +341,9 @@ export async function POST(req: Request) {
       const connectedAccountIds = session.metadata?.connected_account_ids?.split(",").filter(Boolean) || []
 
       // Create transfers to connected accounts
-      await createTransfersToConnectedAccounts(chargeId, connectedAccountIds, charge.amount, charge.currency)
+      if (connectedAccountIds.length > 0) {
+        await createTransfersToConnectedAccounts(chargeId, connectedAccountIds, charge.amount, charge.currency)
+      }
     } catch (error) {
       console.error("Error processing checkout session:", error)
     }
