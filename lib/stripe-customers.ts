@@ -35,8 +35,13 @@ export async function findStripeCustomerByEmail(email: string): Promise<{
       console.log(`Found ${customers.data.length} customers with email ${email}`)
 
       // First, look for customers with payment methods
+    //  const customersWithPaymentMethods = customers.data.filter(
+    //    (customer) => (customer.sources?.data?.length || 0) > 0 || (customer.payment_methods?.data?.length || 0) > 0,
+    //  )
+
+      // First, look for customers with payment methods
       const customersWithPaymentMethods = customers.data.filter(
-        (customer) => (customer.sources?.data?.length || 0) > 0 || (customer.payment_methods?.data?.length || 0) > 0,
+        (customer) => (customer.sources?.data?.length || 0) > 0,
       )
 
       if (customersWithPaymentMethods.length > 0) {

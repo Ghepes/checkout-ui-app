@@ -4,7 +4,7 @@ import Stripe from "stripe"
 
 // Initialize Stripe with your secret key
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY as string, {
-  apiVersion: "2023-10-16",
+  apiVersion: "2025-02-24.acacia",
 })
 
 // The correct transfer group ID
@@ -259,7 +259,7 @@ export async function POST(req: Request) {
   console.log("Webhook received:", new Date().toISOString())
 
   const body = await req.text()
-  const headersList = headers()
+  const headersList = await headers()
   const signature = headersList.get("stripe-signature")
 
   if (!signature) {
