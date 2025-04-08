@@ -53,14 +53,6 @@ async function createTransfersToConnectedAccounts(
     if (sessions.data.length > 0) {
       const session = sessions.data[0]
 
-      // Check if this is a multi-vendor checkout
-      const isMultiVendor = session.metadata?.is_multi_vendor === "true"
-
-      if (isMultiVendor) {
-        console.log("This is part of a multi-vendor checkout - transfers are handled via application fees")
-        return
-      }
-
       // Get product-specific connected account mappings if available
       const productConnectedAccounts = session.metadata?.product_connected_accounts
         ? session.metadata.product_connected_accounts.split(",").reduce((acc: Record<string, string>, item: string) => {
@@ -208,59 +200,12 @@ async function createTransfersToConnectedAccounts(
   }
 }
 
-// Function to handle multi-vendor checkout continuation
-async function handleMultiVendorContinuation(session: Stripe.Checkout.Session) {
-  try {
-    // Check if this is a multi-vendor checkout
-    if (session.metadata?.is_multi_vendor !== "true") {
-      return
-    }
-
-    const vendorCount = Number.parseInt(session.metadata?.vendor_count || "0", 10)
-    const currentVendorIndex = Number.parseInt(session.metadata?.current_vendor_index || "0", 10)
-
-    // If this is the last vendor, we're done
-    if (currentVendorIndex >= vendorCount) {
-      console.log("Multi-vendor checkout complete - all vendors processed")
-      return
-    }
-
-    // Get the next vendor from the metadata
-    const allVendorIds = session.metadata?.all_vendor_ids?.split(",") || []
-
-    // If we don't have all vendor IDs stored, we can't continue
-    if (allVendorIds.length === 0) {
-      console.log("No vendor IDs found in metadata - cannot continue multi-vendor checkout")
-      return
-    }
-
-    const nextVendorIndex = currentVendorIndex + 1
-    if (nextVendorIndex >= allVendorIds.length) {
-      console.log("No more vendors to process")
-      return
-    }
-
-    const nextVendorId = allVendorIds[nextVendorIndex]
-
-    // We would need to create the next checkout session here, but this requires
-    // more context about the items for the next vendor, which we don't have in this webhook
-    console.log(`Next vendor to process: ${nextVendorId} (index ${nextVendorIndex})`)
-
-    // In a real implementation, you would either:
-    // 1. Store all the necessary data in the session metadata
-    // 2. Or make an API call to your backend to get the next vendor's items
-    // 3. Or redirect the user to a page that handles the next vendor checkout
-  } catch (error) {
-    console.error("Error handling multi-vendor continuation:", error)
-  }
-}
-
 export async function POST(req: Request) {
   console.log("Webhook received:", new Date().toISOString())
 
   const body = await req.text()
-  const headersList = await headers()
-  const signature = headersList.get("stripe-signature")
+  const headersList = headers()
+  const signature = (await headersList).get("stripe-signature")
 
   if (!signature) {
     console.error("Missing stripe-signature header")
@@ -284,15 +229,6 @@ export async function POST(req: Request) {
     console.log("Processing checkout session:", session.id)
 
     try {
-      // Check if this is a multi-vendor checkout
-      const isMultiVendor = session.metadata?.is_multi_vendor === "true"
-
-      if (isMultiVendor) {
-        console.log("This is a multi-vendor checkout session")
-        // Handle multi-vendor continuation
-        await handleMultiVendorContinuation(session)
-      }
-
       // Get the payment intent ID
       const paymentIntentId = session.payment_intent as string
       if (!paymentIntentId) {
