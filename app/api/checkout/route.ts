@@ -6,7 +6,7 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY as string, {
 })
 
 // The correct transfer group ID
-const ACCOUNT_GROUP_ID = "default"
+const ACCOUNT_GROUP_ID = process.env.ACCOUNT_GROUP_ID || "default"
 
 interface CartItem {
   id: string
@@ -17,6 +17,8 @@ interface CartItem {
   vendorName?: string
   vendorEmail?: string
   price?: number
+  productImage?: string
+  productDev0?: string
 }
 
 interface CheckoutRequest {
@@ -96,6 +98,17 @@ export async function POST(req: Request) {
       .map((item) => `${item.id}:${item.stripeConnectedAccountId}`)
       .join(",")
 
+    // Collect all product details for metadata
+    const productDetails = items.map((item) => ({
+      id: item.id,
+      name: item.name || "Unknown Product",
+      image: item.productImage || "",
+      downloadUrl: item.productDev0 || "",
+    }))
+
+    // Log product details for debugging
+    console.log("Product details for metadata:", productDetails)
+
     // Prepare session parameters
     const sessionParams: Stripe.Checkout.SessionCreateParams = {
       payment_method_types: ["card"],
@@ -111,6 +124,9 @@ export async function POST(req: Request) {
         vendor_emails: items.map((item) => item.vendorEmail || "").join(","),
         connected_account_ids: finalConnectedAccountIds.join(","),
         product_connected_accounts: productConnectedAccounts,
+        // Add crucial fields for MongoDB storage
+        productDev0: items.map((item) => item.productDev0 || "").join(","),
+        product_images: items.map((item) => item.productImage || "").join(","),
       },
     }
 
@@ -139,8 +155,19 @@ export async function POST(req: Request) {
       metadata: {
         connected_account_ids: finalConnectedAccountIds.join(","),
         product_connected_accounts: productConnectedAccounts,
+        // Also include crucial fields in payment intent metadata
+        productDev0: items.map((item) => item.productDev0 || "").join(","),
+        product_images: items.map((item) => item.productImage || "").join(","),
+        product_names: items.map((item) => item.name || "").join(","),
       },
     }
+
+    // Log the session parameters for debugging
+    console.log("Creating checkout session with params:", {
+      lineItems: sessionParams.line_items?.length,
+      metadata: sessionParams.metadata,
+      paymentIntentMetadata: sessionParams.payment_intent_data?.metadata,
+    })
 
     // Create the checkout session
     const session = await stripe.checkout.sessions.create(sessionParams)
